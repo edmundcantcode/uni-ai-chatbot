@@ -1,12 +1,14 @@
 from fastapi import APIRouter
-from backend.parse_query import parse_query
+from backend.llm.parse_query import parse_query
 from backend.intents.query_students import query_students
-from backend.intents.predict_honors import predict_honors_logic
+from backend.intents.classify_award import classify_award_logic
 from backend.intents.weak_subjects import handle_list_weak_subjects
 from backend.intents.strong_subjects import handle_list_strong_subjects
 from backend.intents.failed_subjects import handle_list_failed_subjects
 from backend.intents.get_subject_grades import handle_get_subject_grades
 from backend.intents.get_student_profile import handle_get_student_profile
+from backend.llm.result_explainer import explain_result
+from backend.intents.check_honors_class import check_honors_class
 
 from pydantic import BaseModel
 
@@ -40,7 +42,6 @@ async def chatbot_endpoint(payload: QueryRequest):
         print("🧠 Detected intent:", intent)
         print("🔍 Final filters used:", filters)
 
-        # 🔐 Ensure ID is integer for Cassandra
         if "id" in filters:
             try:
                 filters["id"] = int(filters["id"])
@@ -49,8 +50,8 @@ async def chatbot_endpoint(payload: QueryRequest):
                 continue
 
         # 🔁 Intent Routing
-        if intent == "predict_honors":
-            result = predict_honors_logic(filters)
+        elif intent == "classify_award":
+             result = classify_award_logic(filters)
         elif intent == "show_students":
             result = query_students(filters)
         elif intent == "explain_prediction":
@@ -65,10 +66,16 @@ async def chatbot_endpoint(payload: QueryRequest):
             result = handle_get_subject_grades(filters)
         elif intent == "get_student_profile":
             result = handle_get_student_profile(filters)
-
+        elif intent == "predict_honors":
+            result = check_honors_class(filters)
         else:
             result = {"error": f"Unknown intent: {intent}"}
 
+        # 📦 Append result and add explanation only if no error
         responses.append(result)
+        if intent != "unknown" and not result.get("error"):
+            explanation = explain_result(payload.query, result)
+            responses[-1]["explanation"] = explanation
 
     return {"results": responses}
+
