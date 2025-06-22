@@ -7,6 +7,7 @@ from backend.intents.strong_subjects import handle_list_strong_subjects
 from backend.intents.failed_subjects import handle_list_failed_subjects
 from backend.intents.get_subject_grades import handle_get_subject_grades
 from backend.intents.get_student_profile import handle_get_student_profile
+
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -64,6 +65,7 @@ async def chatbot_endpoint(payload: QueryRequest):
             result = handle_get_subject_grades(filters)
         elif intent == "get_student_profile":
             result = handle_get_student_profile(filters)
+
         else:
             result = {"error": f"Unknown intent: {intent}"}
 

@@ -11,6 +11,8 @@ cloudpathlib==0.21.1
 colorama==0.4.6
 confection==0.1.5
 cymem==2.0.11
+en_core_web_lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 fastapi==0.115.12
 fuzzywuzzy==0.18.0
 geomet==0.2.1.post1

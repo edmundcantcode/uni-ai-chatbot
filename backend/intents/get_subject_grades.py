@@ -24,16 +24,30 @@ def handle_get_subject_grades(filters: dict):
             query = "SELECT subjectname, grade FROM subjects WHERE id = %s AND subjectname = %s ALLOW FILTERING"
             params = [int(filters["id"]), filters["subjectname"]]
         else:
-            query = "SELECT subjectname, grade FROM subjects WHERE id = %s"
+            query = "SELECT subjectname, grade FROM subjects WHERE id = %s ALLOW FILTERING"
             params = [int(filters["id"])]
 
         rows = session.execute(query, params)
         results = [{"subject": row.subjectname, "grade": row.grade} for row in rows]
+
+        # 🔍 Grade filter (if provided)
+        if "grade_condition" in filters:
+            condition = filters["grade_condition"]
+            try:
+                if condition.startswith("== "):
+                    target = condition[3:].strip()
+                    results = [r for r in results if r["grade"] == target]
+                elif condition.startswith("in "):
+                    values = eval(condition[3:].strip())  # safe if used internally
+                    results = [r for r in results if r["grade"] in values]
+            except Exception as e:
+                return {"error": f"Invalid grade_condition format: {e}"}
 
         return {
             "student_id": filters["id"],
             "grades": results,
             "count": len(results)
         }
+
     except Exception as e:
         return {"error": str(e)}

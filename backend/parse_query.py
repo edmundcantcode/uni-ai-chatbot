@@ -31,49 +31,57 @@ def fuzzy_match(text, choices, threshold=80):
 # ✅ LLM fallback using LM Studio (DeepSeek)
 def fallback_to_deepseek(query: str, max_retries=2):
     prompt = f"""
-    You are a university AI assistant.
+        You are a university AI assistant.
 
-    Your job is to convert a user query into structured JSON for processing.
+        Your job is to convert a user query into structured JSON for processing.
 
-    ✅ The output must be:
-    - A JSON array of one or more objects
-    - Each object must contain:
-    - "intent": one of the following:
-        ["predict_honors", "explain_prediction", "show_students", "list_weak_subjects", "list_strong_subjects", "count_failed_subjects", "get_subject_grades", "get_attendance_summary", "list_subjects_by_semester", "get_student_profile", "compare_students"]
-    - "filters": a dictionary with values like:
-        "id", "student_id", "name", "subjectname", "programme", "cgpa_condition", "gender", "race", "country", "year", "semester", "awardclassification", "scholarship", "fail_rate_condition", etc.
+        Use "show_students" if the query is about listing students based on CGPA, programme, gender, or race.
+        Use "count_failed_subjects" only if the user explicitly asks for how many subjects a student has failed.
 
-    ❌ DO NOT explain or describe the logic.
-    ❌ DO NOT use markdown, bullet points, <think>, or natural language.
-    ❌ DO NOT output anything except the JSON array.
+        ✅ The output must be:
+        - A JSON array of one or more objects
+        - Each object must contain:
+            - "intent": one of the following:
+            ["predict_honors", "explain_prediction", "show_students", "list_weak_subjects", "list_strong_subjects", "count_failed_subjects", "get_subject_grades", "get_attendance_summary", "list_subjects_by_semester", "get_student_profile", "compare_students"]
+            - "filters": a dictionary with keys such as:
 
-    ⚠️ Your response MUST start with a `[` character.
+                "id", "student_id", "name", "gender", "race", "country", "programme", "programmecode",
+                "year", "sem", "broadsheetyear", "status", "awardclassification",
+                "subjectname", "subjectcode",
+                "cgpa_condition", "fail_rate_condition", "avg_grade_score_condition", "num_failed_condition",
+                "scholarship", "financialaid"
 
-    ---
+        ❌ DO NOT explain or describe the logic.
+        ❌ DO NOT use markdown, bullet points, <think>, or natural language.
+        ❌ DO NOT output anything except the JSON array.
 
-    🧪 Example Input:
-    "Show Diana Brown’s profile and list any weak subjects she has."
+        ⚠️ Your response MUST start with a `[` character.
 
-    🧾 Example Output:
-    [
-      {{
-        "intent": "get_student_profile",
-        "filters": {{
-          "name": "Diana Brown"
+        ---
+
+        🧪 Example Input:
+        "Show Diana Brown’s profile and list any weak subjects she has."
+
+        🧾 Example Output:
+        [
+        {{
+            "intent": "get_student_profile",
+            "filters": {{
+            "name": "Diana Brown"
+            }}
+        }},
+        {{
+            "intent": "list_weak_subjects",
+            "filters": {{
+            "name": "Diana Brown"
+            }}
         }}
-      }},
-      {{
-        "intent": "list_weak_subjects",
-        "filters": {{
-          "name": "Diana Brown"
-        }}
-      }}
-    ]
+        ]
 
-    Now do the same for:
+        Now do the same for:
 
-    "{query}"
-    """
+        "{query}"
+        """
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -98,12 +106,24 @@ def fallback_to_deepseek(query: str, max_retries=2):
                 # Strip <think> or markdown
                 cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
 
-                match = re.search(r'\[\s*{.*?}\s*]', cleaned, re.DOTALL)
+                match = re.search(r'\[.*\]', cleaned, re.DOTALL)
                 if match:
                     parsed = json.loads(match.group(0))
 
                     for item in parsed:
                         filters = item.get("filters", {})
+
+                        # 🧼 Clean up any escaped quotes like '>=\"3.5\"'
+                        for k, v in filters.items():
+                            if isinstance(v, str):
+                                filters[k] = v.replace('\\"', '').replace('"', '').strip()
+
+                        if "student_id" in filters:
+                            filters["id"] = filters.pop("student_id")
+
+                        if "subjectname" in filters:
+                            filters["subjectname"] = filters["subjectname"].replace(" ", "")
+
                         if "student_id" in filters:
                             filters["id"] = filters.pop("student_id")
                         if "subjectname" in filters:
@@ -126,3 +146,4 @@ def fallback_to_deepseek(query: str, max_retries=2):
 def parse_query(query: str):
     print("🤖 [LLM MODE] Skipping spaCy/fuzzy and using DeepSeek only...")
     return fallback_to_deepseek(query)
+
