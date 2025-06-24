@@ -1,81 +1,112 @@
-from fastapi import APIRouter
-from backend.llm.parse_query import parse_query
-from backend.intents.query_students import query_students
-from backend.intents.classify_award import classify_award_logic
-from backend.intents.weak_subjects import handle_list_weak_subjects
-from backend.intents.strong_subjects import handle_list_strong_subjects
-from backend.intents.failed_subjects import handle_list_failed_subjects
-from backend.intents.get_subject_grades import handle_get_subject_grades
-from backend.intents.get_student_profile import handle_get_student_profile
-from backend.llm.result_explainer import explain_result
-from backend.intents.check_honors_class import check_honors_class
+# backend/chatbot_router.py
 
+from fastapi import APIRouter
 from pydantic import BaseModel
+from backend.llm.generate_cql import generate_cql_from_query
+from backend.database.connect_cassandra import session
+from backend.utils.student_check import resolve_name_to_id
+from backend.utils.fuzzy_matcher import patch_fuzzy_values
+from fastapi.responses import JSONResponse
+from cassandra.util import SortedSet, OrderedMapSerializedKey
+import re
+import collections.abc
 
 router = APIRouter()
 
 class QueryRequest(BaseModel):
     query: str
 
+# 🔍 Extract capitalized names like "Bob Johnson"
+def extract_name_if_present(text: str):
+    match = re.search(r"\b([A-Z][a-z]+\s[A-Z][a-z]+)\b", text)
+    return match.group(1) if match else None
+
+# 🔧 Recursively convert anything to JSON-safe types
+def deep_convert(obj):
+    if isinstance(obj, dict):
+        return {str(deep_convert(k)): deep_convert(v) for k, v in obj.items()}
+    elif isinstance(obj, (SortedSet, OrderedMapSerializedKey, set, frozenset)):
+        return [deep_convert(item) for item in obj]
+    elif isinstance(obj, list):
+        return [deep_convert(item) for item in obj]
+    elif hasattr(obj, "_asdict"):
+        return deep_convert(obj._asdict())
+    elif hasattr(obj, "__dict__"):
+        return deep_convert(vars(obj))
+    return obj
+
+# 🔧 Flatten list-of-dict fields like subjects or qualifications
+def flatten_nested_fields(row):
+    flat_row = {}
+    for k, v in row.items():
+        if isinstance(v, list) and all(isinstance(i, dict) for i in v):
+            for i, item in enumerate(v):
+                for subkey, subval in item.items():
+                    flat_row[f"{k}_{i}_{subkey}"] = subval
+        else:
+            flat_row[k] = v
+    return flat_row
+
+# 🔧 Fully clean each row for JSON serialization
+def clean_row(row):
+    raw = deep_convert(row)
+    return flatten_nested_fields(raw)
+
 @router.post("/chatbot")
 async def chatbot_endpoint(payload: QueryRequest):
-    parsed_intents = parse_query(payload.query)
-    responses = []
+    try:
+        user_query = payload.query.strip()
+        processed_query = user_query
 
-    # 🧠 Save shared filters like ID or name
-    shared_filters = {}
-    for item in parsed_intents:
-        shared_filters.update(item.get("filters", {}))
+        # Step 0: Try fuzzy name → ID
+        name = extract_name_if_present(user_query)
+        if name:
+            resolved_id = resolve_name_to_id(name)
+            if resolved_id:
+                processed_query = user_query.replace(name, str(resolved_id))
 
-    for item in parsed_intents:
-        intent = item.get("intent")
-        filters = item.get("filters", {})
+        # Step 1: Generate CQL using LLM
+        cql = generate_cql_from_query(processed_query)
+        print("▶️ CQL:", cql)
 
-        # 🧠 Patch filters if DeepSeek missed "id" or "name"
-        if "id" not in filters and "student_id" in shared_filters:
-            filters["id"] = shared_filters["student_id"]
-        elif "id" not in filters and "id" in shared_filters:
-            filters["id"] = shared_filters["id"]
-        if "name" not in filters and "name" in shared_filters:
-            filters["name"] = shared_filters["name"]
+        # Step 2: Patch illegal subquery syntax (e.g. SELECT id FROM students ...)
+        if "SELECT id FROM students" in cql:
+            print("⚠️ Detected unsupported subquery. Attempting patch...")
+            match = re.search(r"name\s*=\s*'([^']+)'", cql)
+            if match:
+                name = match.group(1)
+                id_result = session.execute(
+                    f"SELECT id FROM students WHERE name = '{name}' ALLOW FILTERING"
+                ).one()
+                if id_result:
+                    student_id = id_result.id
+                    fixed_cql = re.sub(r"IN\s*\(SELECT id FROM students.*?\)", f"= {student_id}", cql)
+                    fixed_cql = re.sub(r"\s+AND\s+id\s+IS\s+NOT\s+NULL", "", fixed_cql, flags=re.IGNORECASE)
+                    print("🔁 Patched CQL:", fixed_cql)
+                    cql = fixed_cql
+                else:
+                    raise ValueError(f"❌ Student '{name}' not found.")
+            else:
+                raise ValueError("❌ Could not extract name from subquery.")
 
-        print("🧠 Detected intent:", intent)
-        print("🔍 Final filters used:", filters)
+        # Step 3: Append ALLOW FILTERING if needed
+        if "WHERE" in cql.upper() and "ALLOW FILTERING" not in cql.upper():
+            print("⚠️ Query might need ALLOW FILTERING. Appending it.")
+            cql += " ALLOW FILTERING"
 
-        if "id" in filters:
-            try:
-                filters["id"] = int(filters["id"])
-            except (ValueError, TypeError):
-                responses.append({"error": f"Invalid ID format: {filters['id']}"})
-                continue
+        # Step 4: Execute query on Cassandra
+        rows = session.execute(cql)
+        result = [clean_row(row) for row in rows]
 
-        # 🔁 Intent Routing
-        elif intent == "classify_award":
-             result = classify_award_logic(filters)
-        elif intent == "show_students":
-            result = query_students(filters)
-        elif intent == "explain_prediction":
-            result = {"error": "🔧 Explanation not implemented yet."}
-        elif intent == "list_weak_subjects":
-            result = handle_list_weak_subjects(filters)
-        elif intent == "list_strong_subjects":
-            result = handle_list_strong_subjects(filters)
-        elif intent == "list_failed_subjects":
-            result = handle_list_failed_subjects(filters)
-        elif intent == "get_subject_grades":
-            result = handle_get_subject_grades(filters)
-        elif intent == "get_student_profile":
-            result = handle_get_student_profile(filters)
-        elif intent == "predict_honors":
-            result = check_honors_class(filters)
-        else:
-            result = {"error": f"Unknown intent: {intent}"}
+        # Step 5: Return response
+        return JSONResponse(content={
+            "query": user_query,
+            "processed_query": processed_query,
+            "cql": cql,
+            "result": result
+        })
 
-        # 📦 Append result and add explanation only if no error
-        responses.append(result)
-        if intent != "unknown" and not result.get("error"):
-            explanation = explain_result(payload.query, result)
-            responses[-1]["explanation"] = explanation
-
-    return {"results": responses}
-
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(content={"error": str(e)}, status_code=500)

@@ -22,11 +22,45 @@ export default function Chatbot() {
     setLoading(false);
   };
 
-  // Extract only the final explanation after </think>
-  const getCleanExplanation = (text) => {
-    if (!text) return "";
-    const split = text.split("</think>");
-    return split.length > 1 ? split[1].trim() : text.trim();
+  const downloadCSV = (data, filename) => {
+    const keys = Object.keys(data[0]);
+    const csv = [keys.join(",")].concat(
+      data.map((row) => keys.map((k) => JSON.stringify(row[k] || "")).join(","))
+    ).join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+  };
+
+  const renderTable = (data) => {
+    if (!Array.isArray(data) || data.length === 0) {
+      return <p>No results found.</p>;
+    }
+
+    const columns = Object.keys(data[0]);
+    return (
+      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: "1rem" }}>
+        <thead>
+          <tr>
+            {columns.map((header) => (
+              <th key={header} style={{ borderBottom: "1px solid #ccc", textAlign: "left", padding: "0.5rem" }}>{header}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((row, rowIdx) => (
+            <tr key={rowIdx}>
+              {columns.map((col, colIdx) => (
+                <td key={colIdx} style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{row[col]}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
   };
 
   return (
@@ -35,30 +69,16 @@ export default function Chatbot() {
       <div style={{ display: "flex", gap: "1rem", marginBottom: "1.5rem" }}>
         <input
           type="text"
-          placeholder="Ask something like: will Diana Brown get Class I honors?"
+          placeholder="Ask something like: show subjects for Bob Johnson"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && askQuery()}
-          style={{
-            flex: 1,
-            padding: "0.75rem 1rem",
-            fontSize: "1rem",
-            border: "1px solid #ccc",
-            borderRadius: "8px",
-          }}
+          style={{ flex: 1, padding: "0.75rem 1rem", fontSize: "1rem", border: "1px solid #ccc", borderRadius: "8px" }}
         />
         <button
           onClick={askQuery}
           disabled={loading}
-          style={{
-            padding: "0.75rem 1.5rem",
-            fontSize: "1rem",
-            background: "#007bff",
-            color: "white",
-            border: "none",
-            borderRadius: "8px",
-            cursor: "pointer",
-          }}
+          style={{ padding: "0.75rem 1.5rem", fontSize: "1rem", background: "#007bff", color: "white", border: "none", borderRadius: "8px", cursor: "pointer" }}
         >
           {loading ? "Thinking..." : "Ask"}
         </button>
@@ -70,35 +90,22 @@ export default function Chatbot() {
         </div>
       )}
 
-      {response?.results && response.results.map((res, idx) => (
-        <div key={idx} style={{
-          background: "#f9f9f9",
-          padding: "1.5rem",
-          marginBottom: "1rem",
-          border: "1px solid #ddd",
-          borderRadius: "10px",
-          boxShadow: "0 2px 4px rgba(0,0,0,0.05)"
-        }}>
-          {res.error ? (
-            <p style={{ color: "#c00" }}>⚠️ {res.error}</p>
-          ) : (
-            <>
-              <p><strong>📌 Student ID:</strong> {res.student_id}</p>
-              <p><strong>📊 CGPA:</strong> {res.cgpa}</p>
-              <p><strong>🎓 Honors Class:</strong> {res.honors_class}</p>
+      {response?.result && (
+        <div style={{ background: "#f9f9f9", padding: "1.5rem", marginBottom: "1rem", border: "1px solid #ddd", borderRadius: "10px", boxShadow: "0 2px 4px rgba(0,0,0,0.05)" }}>
+          <p><strong>Original query:</strong> {response.query}</p>
+          <p><strong>Processed query:</strong> {response.processed_query}</p>
+          <p><strong>Generated CQL:</strong> <code>{response.cql}</code></p>
 
-              {res.explanation && (
-                <details style={{ marginTop: "1rem", cursor: "pointer" }}>
-                  <summary style={{ fontWeight: "bold" }}>📝 Show Explanation</summary>
-                  <p style={{ marginTop: "0.75rem" }}>
-                    {getCleanExplanation(res.explanation)}
-                  </p>
-                </details>
-              )}
-            </>
-          )}
+          {renderTable(response.result)}
+
+          <button
+            onClick={() => downloadCSV(response.result, `result.csv`)}
+            style={{ marginTop: "1rem", background: "#28a745", color: "white", padding: "0.5rem 1rem", border: "none", borderRadius: "6px", cursor: "pointer" }}
+          >
+            📥 Export CSV
+          </button>
         </div>
-      ))}
+      )}
     </div>
   );
 }
