@@ -5,20 +5,32 @@ export default function Chatbot() {
   const [query, setQuery] = useState("");
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [showCQL, setShowCQL] = useState(false);
 
   const askQuery = async () => {
     if (!query.trim()) return;
     setLoading(true);
     setResponse(null);
-    try {
-      const res = await axios.post("http://localhost:8000/chatbot", {
-        query: query.trim(),
-      });
-      setResponse(res.data);
-    } catch (err) {
-      console.error("❌ Error:", err);
-      setResponse({ error: "Failed to fetch response." });
+
+    let attempts = 0;
+    const maxRetries = 10;
+
+    while (attempts < maxRetries) {
+      try {
+        const res = await axios.post("http://localhost:8000/chatbot", {
+          query: query.trim(),
+        });
+        setResponse(res.data);
+        break; // ✅ Success
+      } catch (err) {
+        console.error(`❌ Attempt ${attempts + 1} failed:`, err);
+        if (attempts === maxRetries - 1) {
+          setResponse({ error: "❌ Failed to fetch response after multiple retries." });
+        }
+      }
+      attempts++;
     }
+
     setLoading(false);
   };
 
@@ -94,7 +106,28 @@ export default function Chatbot() {
         <div style={{ background: "#f9f9f9", padding: "1.5rem", marginBottom: "1rem", border: "1px solid #ddd", borderRadius: "10px", boxShadow: "0 2px 4px rgba(0,0,0,0.05)" }}>
           <p><strong>Original query:</strong> {response.query}</p>
           <p><strong>Processed query:</strong> {response.processed_query}</p>
-          <p><strong>Generated CQL:</strong> <code>{response.cql}</code></p>
+
+          <button
+            onClick={() => setShowCQL(!showCQL)}
+            style={{
+              margin: "0.5rem 0",
+              background: "#6c757d",
+              color: "white",
+              padding: "0.4rem 0.8rem",
+              border: "none",
+              borderRadius: "6px",
+              cursor: "pointer"
+            }}
+          >
+            {showCQL ? "Hide CQL" : "Show CQL"}
+          </button>
+
+          {showCQL && (
+            <p style={{ marginTop: "0.5rem", fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
+              <strong>Generated CQL:</strong><br />
+              <code>{response.cql}</code>
+            </p>
+          )}
 
           {renderTable(response.result)}
 
