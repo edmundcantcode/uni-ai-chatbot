@@ -2,11 +2,14 @@ from fuzzywuzzy import fuzz
 import re
 import os
 import json
+from backend.constants.schema_columns import STUDENT_COLUMNS, SUBJECT_COLUMNS
 
 # Load correct values from JSON file
 json_path = os.path.join(os.path.dirname(__file__), "unique_values.json")
 with open(json_path, "r", encoding="utf-8") as f:
     correctable_fields = json.load(f)
+
+ALL_COLUMNS = set(SUBJECT_COLUMNS + STUDENT_COLUMNS)
 
 def normalize_text(text: str) -> str:
     """Lowercase and remove non-alphanumeric chars for better fuzzy matching."""
@@ -43,13 +46,11 @@ def correct_value(input_val: str, field_values: list, field_name: str = "", thre
         print(f"⚠️ No good match for '{input_val}' in field '{field_name}'. Best score: {best_score}. Skipping.")
         return None
 
-
 def patch_fuzzy_values(cql: str) -> str:
     """
     Patch all known fields in a CQL query by fuzzy matching literal values
     to their canonical forms from correctable_fields.
     """
-
     # ✅ Fix possible LLM typos in field names inside raw CQL
     cql = cql.replace("suubjectname", "subjectname")  # Add more if needed
 
@@ -60,6 +61,11 @@ def patch_fuzzy_values(cql: str) -> str:
         pattern = fr"{field}\s*=\s*'([^']+)'"
         matches = re.findall(pattern, cql, re.IGNORECASE)
         for raw_input in matches:
+            # ⛔ Avoid fuzzy-correcting if it looks like a column name
+            if normalize_text(raw_input) in [normalize_text(c) for c in ALL_COLUMNS]:
+                print(f"⛔ Skipping fuzzy match: '{raw_input}' looks like a column name")
+                continue
+
             corrected = correct_value(raw_input, valid_values, field_name=field)
             if corrected and corrected != raw_input:
                 print(f"🛠️ Replacing in CQL: {field}='{raw_input}' → '{corrected}'")

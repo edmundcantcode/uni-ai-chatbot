@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.chatbot_router import router as chatbot_router
+from backend.routes.chatbot_router import router as chatbot_router
 from backend.database.connect_cassandra import session
 
 app = FastAPI()

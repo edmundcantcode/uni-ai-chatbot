@@ -6,29 +6,25 @@ export default function Chatbot() {
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
   const [showCQL, setShowCQL] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
 
   const askQuery = async () => {
     if (!query.trim()) return;
     setLoading(true);
     setResponse(null);
 
-    let attempts = 0;
-    const maxRetries = 10;
-
-    while (attempts < maxRetries) {
-      try {
-        const res = await axios.post("http://localhost:8000/chatbot", {
-          query: query.trim(),
-        });
-        setResponse(res.data);
-        break; // ✅ Success
-      } catch (err) {
-        console.error(`❌ Attempt ${attempts + 1} failed:`, err);
-        if (attempts === maxRetries - 1) {
-          setResponse({ error: "❌ Failed to fetch response after multiple retries." });
-        }
+    try {
+      const res = await axios.post("http://localhost:8000/chatbot", {
+        query: query.trim(),
+      });
+      setResponse(res.data);
+    } catch (err) {
+      console.error("❌ Request failed:", err);
+      if (err.response?.data?.error) {
+        setResponse({ error: err.response.data.error });
+      } else {
+        setResponse({ error: "❌ Unexpected error occurred." });
       }
-      attempts++;
     }
 
     setLoading(false);
@@ -53,31 +49,42 @@ export default function Chatbot() {
     }
 
     const columns = Object.keys(data[0]);
+
     return (
-      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: "1rem" }}>
-        <thead>
-          <tr>
-            {columns.map((header) => (
-              <th key={header} style={{ borderBottom: "1px solid #ccc", textAlign: "left", padding: "0.5rem" }}>{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {data.map((row, rowIdx) => (
-            <tr key={rowIdx}>
-              {columns.map((col, colIdx) => (
-                <td key={colIdx} style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{row[col]}</td>
+      <div style={{ maxHeight: "400px", overflowY: "auto", border: "1px solid #ccc", borderRadius: "6px" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1 }}>
+            <tr>
+              {columns.map((header) => (
+                <th
+                  key={header}
+                  style={{ borderBottom: "1px solid #ccc", textAlign: "left", padding: "0.5rem", background: "#f0f0f0" }}
+                >
+                  {header}
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {data.map((row, rowIdx) => (
+              <tr key={rowIdx}>
+                {columns.map((col, colIdx) => (
+                  <td key={colIdx} style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
+                    {row[col]}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     );
   };
 
   return (
     <div style={{ padding: "2rem", fontFamily: "'Segoe UI', sans-serif", maxWidth: "900px", margin: "auto" }}>
       <h2 style={{ fontSize: "1.8rem", marginBottom: "1rem" }}>🎓 University AI Chatbot</h2>
+
       <div style={{ display: "flex", gap: "1rem", marginBottom: "1.5rem" }}>
         <input
           type="text"
@@ -102,6 +109,22 @@ export default function Chatbot() {
         </div>
       )}
 
+      {response?.message && (
+        <div style={{
+          background: "#e6f4ea",
+          border: "1px solid #b6dfc2",
+          borderRadius: "8px",
+          padding: "1.5rem",
+          marginBottom: "1rem",
+          fontSize: "1.1rem",
+          color: "#245f36"
+        }}>
+          <p><strong>Original query:</strong> {response.query}</p>
+          <p><strong>Processed query:</strong> {response.processed_query}</p>
+          <p style={{ marginTop: "1rem" }}>{response.message}</p>
+        </div>
+      )}
+
       {response?.result && (
         <div style={{ background: "#f9f9f9", padding: "1.5rem", marginBottom: "1rem", border: "1px solid #ddd", borderRadius: "10px", boxShadow: "0 2px 4px rgba(0,0,0,0.05)" }}>
           <p><strong>Original query:</strong> {response.query}</p>
@@ -109,15 +132,7 @@ export default function Chatbot() {
 
           <button
             onClick={() => setShowCQL(!showCQL)}
-            style={{
-              margin: "0.5rem 0",
-              background: "#6c757d",
-              color: "white",
-              padding: "0.4rem 0.8rem",
-              border: "none",
-              borderRadius: "6px",
-              cursor: "pointer"
-            }}
+            style={{ margin: "0.5rem 0", background: "#6c757d", color: "white", padding: "0.4rem 0.8rem", border: "none", borderRadius: "6px", cursor: "pointer" }}
           >
             {showCQL ? "Hide CQL" : "Show CQL"}
           </button>
@@ -138,6 +153,19 @@ export default function Chatbot() {
             📥 Export CSV
           </button>
         </div>
+      )}
+
+      <button
+        onClick={() => setShowDebug(!showDebug)}
+        style={{ marginTop: "1rem", background: "#888", color: "white", padding: "0.4rem 0.8rem", border: "none", borderRadius: "6px", cursor: "pointer", fontSize: "0.9rem" }}
+      >
+        {showDebug ? "Hide JSON Debug" : "Show JSON Debug"}
+      </button>
+
+      {showDebug && (
+        <pre style={{ fontSize: "0.8rem", color: "#555", marginTop: "1rem", background: "#f5f5f5", padding: "1rem", borderRadius: "8px", overflowX: "auto" }}>
+          {JSON.stringify(response, null, 2)}
+        </pre>
       )}
     </div>
   );
