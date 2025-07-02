@@ -1,7 +1,7 @@
 import { useState } from "react";
 import axios from "axios";
 
-export default function Chatbot() {
+export default function Chatbot({ user }) {
   const [query, setQuery] = useState("");
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -16,6 +16,8 @@ export default function Chatbot() {
     try {
       const res = await axios.post("http://localhost:8000/chatbot", {
         query: query.trim(),
+        userid: user.userid,
+        role: user.role
       });
       setResponse(res.data);
     } catch (err) {
@@ -41,6 +43,11 @@ export default function Chatbot() {
     link.href = URL.createObjectURL(blob);
     link.download = filename;
     link.click();
+  };
+
+  const logout = () => {
+    localStorage.removeItem("user");
+    window.location.reload();
   };
 
   const renderTable = (data) => {
@@ -83,7 +90,28 @@ export default function Chatbot() {
 
   return (
     <div style={{ padding: "2rem", fontFamily: "'Segoe UI', sans-serif", maxWidth: "900px", margin: "auto" }}>
-      <h2 style={{ fontSize: "1.8rem", marginBottom: "1rem" }}>🎓 University AI Chatbot</h2>
+      <h2 style={{ fontSize: "1.8rem", marginBottom: "0.5rem" }}>
+        🎓 University AI Chatbot
+      </h2>
+      <h3 style={{ fontSize: "1.5rem", marginBottom: "1.5rem", color: "#444" }}>
+        {user.role === "admin"
+          ? "👋 Hi admin"
+          : `👋 Hi student ${user.userid}`}
+      </h3>
+      <p style={{ marginBottom: "0.5rem" }}>
+        Logged in as: <strong>{user.role}</strong> ({user.userid})
+      </p>
+      <button onClick={logout} style={{
+        marginBottom: "1.5rem",
+        background: "#dc3545",
+        color: "white",
+        border: "none",
+        padding: "0.4rem 0.8rem",
+        borderRadius: "6px",
+        cursor: "pointer"
+      }}>
+        Logout
+      </button>
 
       <div style={{ display: "flex", gap: "1rem", marginBottom: "1.5rem" }}>
         <input
@@ -125,6 +153,43 @@ export default function Chatbot() {
         </div>
       )}
 
+      {response?.clarification && response?.choices?.length > 0 && (
+        <div style={{
+          background: "#fff3cd",
+          border: "1px solid #ffeeba",
+          padding: "1rem",
+          borderRadius: "8px",
+          marginBottom: "1rem"
+        }}>
+          <p><strong>{response.message}</strong></p>
+          <ul style={{ listStyle: "none", padding: 0 }}>
+            {response.choices.map((choice) => (
+              <li key={choice.id} style={{ margin: "0.5rem 0" }}>
+                <button
+                  onClick={() => {
+                    const modifiedQuery = query.replace(/([A-Z][a-z]+ [A-Z][a-z]+)/, choice.id);
+                    setQuery(modifiedQuery);
+                    setTimeout(() => askQuery(), 0);
+                  }}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    background: "#ffc107",
+                    color: "#000",
+                    border: "none",
+                    borderRadius: "6px",
+                    cursor: "pointer",
+                    width: "100%",
+                    textAlign: "left"
+                  }}
+                >
+                  {choice.id} — {choice.programme} (Cohort {choice.cohort})
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {response?.result && (
         <div style={{ background: "#f9f9f9", padding: "1.5rem", marginBottom: "1rem", border: "1px solid #ddd", borderRadius: "10px", boxShadow: "0 2px 4px rgba(0,0,0,0.05)" }}>
           <p><strong>Original query:</strong> {response.query}</p>
@@ -145,6 +210,12 @@ export default function Chatbot() {
           )}
 
           {renderTable(response.result)}
+
+          {response?.verification && (
+            <div style={{ marginTop: "1rem", fontStyle: "italic", color: "#1a5d1a" }}>
+              ✅ LLM Check: {response.verification}
+            </div>
+          )}
 
           <button
             onClick={() => downloadCSV(response.result, `result.csv`)}

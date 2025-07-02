@@ -5,7 +5,7 @@ import json
 from backend.constants.schema_columns import STUDENT_COLUMNS, SUBJECT_COLUMNS
 
 # Load correct values from JSON file
-json_path = os.path.join(os.path.dirname(__file__), "unique_values.json")
+json_path = os.path.join(os.path.dirname(__file__), "unique_values_fuzzy.json")
 with open(json_path, "r", encoding="utf-8") as f:
     correctable_fields = json.load(f)
 

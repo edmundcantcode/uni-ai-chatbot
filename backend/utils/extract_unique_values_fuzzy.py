@@ -1,4 +1,3 @@
-# backend/utils/extract_unique_values.py
 
 import json
 import os
@@ -29,8 +28,7 @@ def extract_all_values():
             print(f"🔍 Extracting: {table}.{col}")
             data[col] = get_distinct_values(table, col)
 
-    # Save to utils/unique_values.json
-    output_path = os.path.join(os.path.dirname(__file__), "unique_values.json")
+    output_path = os.path.join(os.path.dirname(__file__), "unique_values_fuzzy.json")
     with open(output_path, "w") as f:
         json.dump(data, f, indent=2)
         print(f"✅ Saved to {output_path}")
