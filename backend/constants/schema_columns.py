@@ -1,5 +1,3 @@
-# backend/constants/schema_columns.py
-
 STUDENT_COLUMNS = [
     "id", "programme", "awardclassification", "broadsheetyear", "cavg",
     "cohort", "country", "financialaid", "gender", "graduated", "ic", "name",

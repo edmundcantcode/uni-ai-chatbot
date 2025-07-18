@@ -22,6 +22,18 @@ Output: SELECT overallcgpa FROM students WHERE name = 'Diana Davis';
 Input: show subjects taken by Bob Johnson
 Output: SELECT * FROM subjects WHERE id = 9897587;
 
+Input: list all subjects
+Output: SELECT subjectname, subjectcode FROM subjects ALLOW FILTERING;
+
+Input: show all available subjects
+Output: SELECT subjectname, subjectcode FROM subjects ALLOW FILTERING;
+
+Input: show all available subjects
+Output: SELECT DISTINCT subjectname, subjectcode FROM subjects;
+
+Input: what subjects are offered
+Output: SELECT DISTINCT subjectname FROM subjects;
+
 Input: get subject grades for Charlie Davis
 Output: SELECT subjectname, grade FROM subjects WHERE id = 860750;
 

@@ -15,8 +15,8 @@ app.add_middleware(
 )
 
 # ✅ Mount routes
-app.include_router(chatbot_router)
-app.include_router(login_router)
+app.include_router(chatbot_router, prefix="/api")
+app.include_router(login_router, prefix="/auth")
 
 @app.get("/")
 def root():

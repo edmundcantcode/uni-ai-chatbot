@@ -38,11 +38,11 @@ def clean_row(row):
     return flatten_nested_fields(raw)
 
 async def handle_chatbot_query(user_query: str, userid: str, role: str):
-    # 🛑 Block invalid admin queries
+    # If admin accidentally types "my", reject it
     if role == "admin" and "my" in user_query.lower():
-        return JSONResponse({"error": "❌ 'My' queries are not allowed for admin."}, status_code=400)
+        return JSONResponse({"error": "❌ Admins cannot use 'my' in queries. Please specify a student or use filters."}, status_code=400)
 
-    # 🔒 Restrict student access
+    # Students can only access their own ID
     if role == "student":
         id_in_query = re.search(r"\b\d{5,}\b", user_query)
         name = extract_name_if_present(user_query)
@@ -55,24 +55,20 @@ async def handle_chatbot_query(user_query: str, userid: str, role: str):
             if not any(str(row["id"]) == userid for row in matches):
                 return JSONResponse({"error": "❌ You can only access your own data."}, status_code=403)
 
-        user_query = re.sub(r"\bmy\b", f"{userid}'s", user_query, flags=re.IGNORECASE)
-
-    # ✅ Begin normal query handling
+    # ✅ Continue query processing
     processed_query = user_query.strip()
     name = extract_name_if_present(user_query)
     non_name_values = get_all_non_name_values()
 
+    # Prevent false positive name recognition
     if name:
-        folded_name = name.casefold()
-        folded_values = {val.casefold() for val in non_name_values if isinstance(val, str)}
-
-        if folded_name in folded_values:
-            print(f"⚠️ Skipping name '{name}' since it's a known value like awardclassification/country.")
+        if name.casefold() in {val.casefold() for val in non_name_values if isinstance(val, str)}:
+            print(f"⚠️ Skipping name '{name}' since it's a known field value.")
             name = None
-
 
     print("🔍 Extracted name:", name)
 
+    # If name is real and unambiguous, inject ID into query
     if name:
         matched = resolve_all_ids_by_name(name)
 
@@ -93,13 +89,13 @@ async def handle_chatbot_query(user_query: str, userid: str, role: str):
                 ]
             })
 
-        # ✅ One match: inject ID into query string before calling DeepSeek
         resolved_id = matched[0]["id"]
         processed_query = re.sub(name, str(resolved_id), processed_query, flags=re.IGNORECASE)
 
+    # 🧠 Generate and run CQL
     for retry in range(10):
         try:
-            if name and retry > 0 and re.search(rf"\b{name}\b", processed_query):
+            if name and retry > 0:
                 resolved_id = resolve_name_to_id(name)
                 if resolved_id:
                     processed_query = re.sub(name, str(resolved_id), processed_query, flags=re.IGNORECASE)
@@ -108,27 +104,18 @@ async def handle_chatbot_query(user_query: str, userid: str, role: str):
 
             if ";" in cql and cql.count(";") > 1:
                 raise ValueError("Multiple CQL statements detected")
+
             cql = re.sub(r"\bFROMM\b", "FROM", cql, flags=re.IGNORECASE)
             cql = re.sub(r"\bSELECTT\b", "SELECT", cql, flags=re.IGNORECASE)
-
-            if re.search(r"id\s*=\s*\(\s*SELECT", cql, re.IGNORECASE):
-                name_match = re.search(r"WHERE name\s*=\s*'([^']+)'", cql, re.IGNORECASE)
-                if name_match:
-                    name_str = name_match.group(1)
-                    id_rows = session.execute(f"SELECT id FROM students WHERE name = '{name_str}' ALLOW FILTERING")
-                    rows = list(id_rows)
-                    if not rows:
-                        return JSONResponse({"error": f"No ID found for name '{name_str}'"}, status_code=404)
-                    id = rows[0].id
-                    cql = f"SELECT * FROM subjects WHERE id = {id} ALLOW FILTERING"
 
             if "WHERE" in cql.upper() and "ALLOW FILTERING" not in cql.upper():
                 cql += " ALLOW FILTERING"
 
             rows = session.execute(cql)
             result = [clean_row(row) for row in rows]
-            result = [dict(t) for t in {tuple(sorted(d.items())) for d in result}]  # Deduplicate
+            result = [dict(t) for t in {tuple(sorted(d.items())) for d in result}]
 
+            # Normalize financial aid display
             if result and isinstance(result[0], dict) and "financialaid" in result[0]:
                 all_values = []
                 for row in result:
@@ -136,9 +123,7 @@ async def handle_chatbot_query(user_query: str, userid: str, role: str):
                     all_values.extend([x.strip() for x in raw.split(",") if x.strip()])
                 result = [{"financialaid": val} for val in sorted(set(all_values))]
 
-            return JSONResponse(
-                attach_llm_verification(user_query, result, processed_query, cql)
-            )
+            return JSONResponse(attach_llm_verification(user_query, result, processed_query, cql))
 
         except Exception as e:
             if retry == 9:
