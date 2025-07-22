@@ -1,5 +1,5 @@
 {
-  "students.programme": [
+  "programme": [
     "BSc (Hons) Information Systems",
     "BSc (Hons) Information Technology",
     "BSc (Hons) Information Technology (Computer Networking and Security)",
@@ -20,7 +20,7 @@
     "Student Mobility Programme - BSc (Hons) in Computer Science",
     "Student Mobility Programme - Bachelor of Software Engineering (Hons)"
   ],
-  "students.awardclassification": [
+  "awardclassification": [
     " ",
     "Class I",
     "Class II (1)",
@@ -29,7 +29,7 @@
     "Class II (II)",
     "Class III"
   ],
-  "students.country": [
+  "country": [
     "ALGERIA",
     "BAHRAIN",
     "BANGLADESH",
@@ -100,7 +100,7 @@
     "ZIMBABWE",
     "null"
   ],
-  "students.financialaid": [
+  "financialaid": [
     "CIS ECA SCHOLARSHIP",
     "COMMUNITY GRANT",
     "CORPORATE DISCOUNT",
@@ -135,16 +135,16 @@
     "THE STAR EDUCATION FUND",
     "null"
   ],
-  "students.gender": [
+  "gender": [
     "Female",
     "Male",
     "null"
   ],
-  "students.graduated": [
+  "graduated": [
     false,
     true
   ],
-  "students.race": [
+  "race": [
     " ",
     "CHINESE",
     "DUSUN",
@@ -159,7 +159,7 @@
     "SINO-KADAZAN",
     "null"
   ],
-  "students.sponsorname": [
+  "sponsorname": [
     "JPA BURSARY - CONVERTIBLE LOAN",
     "KEMENTERIAN PENGAJIAN TINGGI",
     "MARA SCHOLARSHIP",
@@ -173,18 +173,20 @@
     "YAYASAN DAYADIRI",
     "YAYASAN GAMUDA"
   ],
-  "students.status": [
-    "Active",
-    "Completed",
-    "Defer",
-    "Excluded",
-    "Finished",
-    "Not Enrol",
-    "Transfer Out",
-    "Withdraw",
-    "null"
+  "status": [
+    " ",
+    "RP",
+    "RP2",
+    "RP3",
+    "RP4",
+    "RP5",
+    "RS0",
+    "RS1",
+    "RS2",
+    "RS3",
+    "RS4"
   ],
-  "students.cohort": [
+  "cohort": [
     "201103",
     "201108",
     "201203",
@@ -229,7 +231,7 @@
     "202509",
     "null"
   ],
-  "subjects.subjectname": [
+  "subjectname": [
     "APPRECIATION OF ETHICS AND CIVILISATION",
     "AccountingforDecisionMaking",
     "AdvancedBusinessAnalytics",
@@ -462,7 +464,7 @@
     "WebProgramming\u00a7",
     "WebandNetworkAnalytics"
   ],
-  "subjects.subjectcode": [
+  "subjectcode": [
     "ACC1024",
     "ACC1044",
     "ACC1064",
@@ -716,7 +718,7 @@
     "WEB1201",
     "WEB2202"
   ],
-  "subjects.programmecode": [
+  "programmecode": [
     "481BCNS",
     "481BCNS1",
     "481BCNS2",
@@ -750,20 +752,7 @@
     "714BMEC",
     "MC(DCIS)"
   ],
-  "subjects.status": [
-    " ",
-    "RP",
-    "RP2",
-    "RP3",
-    "RP4",
-    "RP5",
-    "RS0",
-    "RS1",
-    "RS2",
-    "RS3",
-    "RS4"
-  ],
-  "subjects.grade": [
+  "grade": [
     "(F)",
     "(Z)",
     "-",
@@ -801,7 +790,7 @@
     "P^",
     "null"
   ],
-  "subjects.examyear": [
+  "examyear": [
     11,
     12,
     13,
@@ -818,7 +807,7 @@
     24,
     25
   ],
-  "subjects.exammonth": [
+  "exammonth": [
     1,
     3,
     4,

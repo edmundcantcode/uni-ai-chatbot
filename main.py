@@ -1,6 +1,3 @@
-from dotenv import load_dotenv
-load_dotenv()
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,13 +12,12 @@ from backend.routes.chatbot_routes import router as chatbot_router
 # Import services for initialization
 from backend.llm.llama_integration import LlamaLLM
 from backend.database.connect_cassandra import initialize_database
+
 # Global variables for services
 llama_service = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"🔍 CASSANDRA_HOST: {os.getenv('CASSANDRA_HOST')}")
-    print(f"🔍 OLLAMA_HOST: {os.getenv('OLLAMA_HOST')}")
     """Application lifespan manager for startup and shutdown tasks"""
     
     # Startup
@@ -40,12 +36,8 @@ async def lifespan(app: FastAPI):
     try:
         ollama_host = os.getenv('OLLAMA_HOST', 'localhost')
         ollama_port = os.getenv('OLLAMA_PORT', '11434')
-        base_url = f"http://{ollama_host}:{ollama_port}"
-        
-        print(f"🔧 Initializing LLM with URL: {base_url}")  # Debug line
-        
         llama_service = LlamaLLM(
-            base_url=base_url,
+            base_url=f"http://{ollama_host}:{ollama_port}",
             model=os.getenv('LLAMA_MODEL', 'llama3.2')
         )
         
@@ -57,6 +49,7 @@ async def lifespan(app: FastAPI):
             
     except Exception as e:
         print(f"❌ LLM service initialization failed: {e}")
+        # Don't raise here - allow the app to start without LLM for debugging
     
     print("🎉 Application startup complete!")
     
@@ -111,8 +104,13 @@ async def health_check():
     # Check database
     try:
         from backend.database.connect_cassandra import session
-        session.execute("SELECT COUNT(*) FROM students LIMIT 1")
-        health_status["database"] = "healthy"
+        if session:
+            # Try a basic system query instead of specific table
+            session.execute("SELECT release_version FROM system.local")
+            health_status["database"] = "healthy"
+        else:
+            health_status["database"] = "unhealthy: no session"
+            health_status["overall"] = "degraded"
     except Exception as e:
         health_status["database"] = f"unhealthy: {str(e)}"
         health_status["overall"] = "degraded"

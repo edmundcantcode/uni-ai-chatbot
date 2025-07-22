@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { apiService, API_BASE_URL } from "./api";
 
 export default function Chatbot({ user, onLogout }) {
@@ -25,36 +25,65 @@ export default function Chatbot({ user, onLogout }) {
     scrollToBottom();
   }, [messages]);
 
-  const askQuery = async () => {
-    if (!query.trim()) return;
+  const askQuery = async (queryText = null) => {
+    const currentQuery = queryText || query.trim();
+    if (!currentQuery) return;
     
     // Add user message
     const userMessage = {
       id: Date.now(),
       type: 'user',
-      content: query.trim(),
+      content: currentQuery,
       timestamp: new Date()
     };
-    
     setMessages(prev => [...prev, userMessage]);
-    const currentQuery = query.trim();
+    
     setQuery("");
     setLoading(true);
     setConnectionError(false);
 
     try {
+      // Call the intent-based API
       const response = await apiService.sendQuery(currentQuery, user.userid, user.role);
       
-      // Add bot response
-      const botMessage = {
-        id: Date.now() + 1,
-        type: 'bot',
-        content: response.message || "I've processed your query.",
-        data: response,
-        timestamp: new Date()
-      };
+      // Handle different response types from intent system
+      if (response.clarification) {
+        // Clarification needed - show choices if available
+        const botMessage = {
+          id: Date.now() + 1,
+          type: 'bot',
+          content: response.message || "I need clarification.",
+          data: response,
+          needsClarification: true,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, botMessage]);
+        
+      } else if (response.error || response.access_denied) {
+        // Error or access denied
+        const botMessage = {
+          id: Date.now() + 1,
+          type: 'bot',
+          content: response.message || "An error occurred.",
+          data: response,
+          isError: true,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, botMessage]);
+        
+      } else {
+        // Regular response (including yes/no answers)
+        const botMessage = {
+          id: Date.now() + 1,
+          type: 'bot',
+          content: response.message || "Query processed successfully.",
+          data: response,
+          isYesNo: response.is_yes_no || false,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, botMessage]);
+      }
       
-      setMessages(prev => [...prev, botMessage]);
     } catch (err) {
       console.error("❌ Request failed:", err);
       setConnectionError(true);
@@ -149,17 +178,26 @@ export default function Chatbot({ user, onLogout }) {
   };
 
   const handleChoiceClick = (choice, originalQuery) => {
+    // Handle different types of choices
     let modifiedQuery;
     
-    if (originalQuery.toLowerCase().includes('subject')) {
-      modifiedQuery = `show subjects for student ID ${choice.id}`;
-    } else if (originalQuery.toLowerCase().includes('grade')) {
-      modifiedQuery = `show grades for student ID ${choice.id}`;
-    } else if (originalQuery.toLowerCase().includes('cgpa') || originalQuery.toLowerCase().includes('gpa')) {
-      modifiedQuery = `show CGPA for student ID ${choice.id}`;
+    if (typeof choice === 'string') {
+      // Subject choice (like "OperatingSystemFundamentals")
+      modifiedQuery = `${originalQuery} ${choice}`;
+    } else if (choice.id) {
+      // Student choice
+      if (originalQuery.toLowerCase().includes('subject')) {
+        modifiedQuery = `show subjects for student ID ${choice.id}`;
+      } else if (originalQuery.toLowerCase().includes('grade')) {
+        modifiedQuery = `show grades for student ID ${choice.id}`;
+      } else if (originalQuery.toLowerCase().includes('cgpa') || originalQuery.toLowerCase().includes('gpa')) {
+        modifiedQuery = `show CGPA for student ID ${choice.id}`;
+      } else {
+        modifiedQuery = originalQuery.replace(/([A-Z][a-z]+ [A-Z][a-z]+)/i, `student ID ${choice.id}`);
+      }
     } else {
-      // Generic fallback - replace the name with "student ID X"
-      modifiedQuery = originalQuery.replace(/([A-Z][a-z]+ [A-Z][a-z]+)/i, `student ID ${choice.id}`);
+      // Fallback - use choice as is
+      modifiedQuery = `${originalQuery} ${choice}`;
     }
     
     setQuery(modifiedQuery);
@@ -279,6 +317,11 @@ export default function Chatbot({ user, onLogout }) {
       color: '#721c24',
       border: '1px solid #f5c6cb'
     },
+    yesNoMessage: {
+      backgroundColor: '#d1ecf1',
+      color: '#0c5460',
+      border: '1px solid #bee5eb'
+    },
     timestamp: {
       fontSize: '11px',
       color: '#6c757d',
@@ -339,6 +382,15 @@ export default function Chatbot({ user, onLogout }) {
     cqlButton: {
       backgroundColor: '#17a2b8',
       color: 'white'
+    },
+    intentBadge: {
+      backgroundColor: '#6f42c1',
+      color: 'white',
+      padding: '2px 8px',
+      borderRadius: '12px',
+      fontSize: '11px',
+      fontWeight: '500',
+      marginLeft: '8px'
     },
     inputContainer: {
       backgroundColor: '#fff',
@@ -411,6 +463,9 @@ export default function Chatbot({ user, onLogout }) {
       <div style={styles.header}>
         <h1 style={styles.headerTitle}>
           🤖 University AI Assistant
+          <span style={{ fontSize: '12px', color: '#6c757d', fontWeight: 'normal' }}>
+            (Intent-Based System)
+          </span>
         </h1>
         <div style={styles.headerInfo}>
           <div style={styles.connectionStatus}>
@@ -446,22 +501,30 @@ export default function Chatbot({ user, onLogout }) {
                 style={{
                   ...styles.message,
                   ...(message.type === 'user' ? styles.userMessage : styles.botMessage),
-                  ...(message.isError ? styles.errorMessage : {})
+                  ...(message.isError ? styles.errorMessage : {}),
+                  ...(message.isYesNo ? styles.yesNoMessage : {})
                 }}
               >
                 {message.content}
+                
+                {/* Intent badge for bot messages */}
+                {message.data?.intent && (
+                  <span style={styles.intentBadge}>
+                    {message.data.intent}
+                  </span>
+                )}
                 
                 {/* Data display for bot messages */}
                 {message.data && (
                   <div style={styles.dataContainer}>
                     {message.data.query && (
                       <div style={styles.queryInfo}>
-                        <strong>Query:</strong> {message.data.processed_query || message.data.query}
+                        <strong>Query:</strong> {message.data.query}
                       </div>
                     )}
                     
                     {/* Clarification choices */}
-                    {message.data.clarification && message.data.choices?.length > 0 && (
+                    {message.needsClarification && message.data.choices?.length > 0 && (
                       <div style={styles.choicesContainer}>
                         <strong style={{ fontSize: '14px', color: '#495057' }}>Please select:</strong>
                         {message.data.choices.map((choice, index) => (
@@ -472,7 +535,28 @@ export default function Chatbot({ user, onLogout }) {
                             onMouseOver={(e) => e.target.style.backgroundColor = '#ffeaa7'}
                             onMouseOut={(e) => e.target.style.backgroundColor = '#fff3cd'}
                           >
-                            {choice.id} — {choice.programme} (Cohort {choice.cohort})
+                            {typeof choice === 'string' ? choice : 
+                             choice.name ? `${choice.name} (ID: ${choice.id}) — ${choice.programme} (Cohort ${choice.cohort})` :
+                             JSON.stringify(choice)
+                            }
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    
+                    {/* Subject choices for ambiguous subjects */}
+                    {message.needsClarification && !message.data.choices && message.data.subject_choices?.length > 0 && (
+                      <div style={styles.choicesContainer}>
+                        <strong style={{ fontSize: '14px', color: '#495057' }}>Which subject did you mean:</strong>
+                        {message.data.subject_choices.map((choice, index) => (
+                          <button
+                            key={index}
+                            style={styles.choiceButton}
+                            onClick={() => handleChoiceClick(choice, message.data.query)}
+                            onMouseOver={(e) => e.target.style.backgroundColor = '#ffeaa7'}
+                            onMouseOut={(e) => e.target.style.backgroundColor = '#fff3cd'}
+                          >
+                            {choice}
                           </button>
                         ))}
                       </div>
@@ -481,23 +565,25 @@ export default function Chatbot({ user, onLogout }) {
                     {/* Results table */}
                     {message.data.result && renderTable(message.data.result)}
                     
-                    {/* Verification */}
-                    {message.data.verification && (
+                    {/* Intent confidence */}
+                    {message.data.confidence && (
                       <div style={{ 
-                        marginTop: '12px', 
-                        padding: '8px 12px', 
-                        backgroundColor: '#d4edda', 
-                        color: '#155724',
-                        borderRadius: '6px',
-                        fontSize: '13px'
+                        marginTop: '8px', 
+                        fontSize: '12px',
+                        color: '#6c757d'
                       }}>
-                        ✅ {message.data.verification}
+                        Confidence: {Math.round(message.data.confidence * 100)}%
+                        {message.data.llm_classified && (
+                          <span style={{ marginLeft: '8px', color: '#6f42c1' }}>
+                            🧠 LLM Classified
+                          </span>
+                        )}
                       </div>
                     )}
                     
                     {/* Action buttons */}
                     <div style={styles.actionButtons}>
-                      {message.data.result && (
+                      {message.data.result && Array.isArray(message.data.result) && message.data.result.length > 0 && (
                         <button
                           style={{...styles.actionButton, ...styles.exportButton}}
                           onClick={() => downloadCSV(message.data.result, 'results.csv')}
@@ -530,6 +616,13 @@ export default function Chatbot({ user, onLogout }) {
                       <div id={`debug-${message.id}`} style={{...styles.debugContainer, display: 'none'}}>
                         <strong>Generated CQL:</strong><br/>
                         {message.data.cql}
+                        {message.data.intent && (
+                          <>
+                            <br/><br/>
+                            <strong>Detected Intent:</strong><br/>
+                            {message.data.intent}
+                          </>
+                        )}
                       </div>
                     )}
                   </div>
@@ -603,7 +696,7 @@ export default function Chatbot({ user, onLogout }) {
               disabled={loading}
             />
             <button
-              onClick={askQuery}
+              onClick={() => askQuery()}
               disabled={loading || !query.trim()}
               style={{
                 ...styles.sendButton,
@@ -666,7 +759,7 @@ export default function Chatbot({ user, onLogout }) {
             fontWeight: '600',
             fontSize: '14px'
           }}>
-            Debug Info
+            Debug Info - Intent System
           </div>
           <div style={{
             padding: '12px',
@@ -679,6 +772,8 @@ export default function Chatbot({ user, onLogout }) {
             {API_BASE_URL}<br/><br/>
             <strong>Connection Status:</strong><br/>
             {connectionError ? 'Disconnected' : 'Connected'}<br/><br/>
+            <strong>System Type:</strong><br/>
+            Intent-Based (LLM + Templates)<br/><br/>
             <strong>Last Response:</strong><br/>
             {JSON.stringify(messages[messages.length - 1]?.data || {}, null, 2)}
           </div>
