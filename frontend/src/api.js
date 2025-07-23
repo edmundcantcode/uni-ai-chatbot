@@ -21,6 +21,8 @@ export const apiService = {
   },
  
   sendQuery: async (query, userid, role) => {
+    console.log('🚀 Sending semantic query:', { query, userid, role });
+    
     const response = await fetch(`${API_BASE_URL}/api/chatbot`, {
       method: 'POST',
       headers: {
@@ -30,11 +32,57 @@ export const apiService = {
     });
    
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || error.message || 'Query failed');
+      let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+      
+      try {
+        const error = await response.json();
+        errorMessage = error.error || error.message || error.detail || errorMessage;
+      } catch (parseError) {
+        console.error('Could not parse error response:', parseError);
+      }
+      
+      throw new Error(errorMessage);
     }
    
-    return response.json();
+    const data = await response.json();
+    console.log('📥 Semantic processor response:', data);
+    
+    // Handle semantic processor response format
+    if (data.status === 'success' && data.data) {
+      // Return the semantic processor data format
+      return data;
+    } else if (data.status === 'error') {
+      // Handle error response
+      throw new Error(data.message || 'Query processing failed');
+    } else {
+      // Handle direct response (legacy compatibility)
+      return {
+        status: 'success',
+        data: data
+      };
+    }
+  },
+
+  // Optional: Health check for debugging
+  checkHealth: async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/health`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return { healthy: true, data };
+      } else {
+        return { healthy: false, status: response.status };
+      }
+    } catch (error) {
+      console.error('Health check failed:', error);
+      return { healthy: false, error: error.message };
+    }
   }
 };
 

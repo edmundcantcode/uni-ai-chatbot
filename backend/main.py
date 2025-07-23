@@ -1,161 +1,290 @@
-from dotenv import load_dotenv
-load_dotenv()
+# main.py or app.py - Main application integration
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import os
-import uvicorn
-from contextlib import asynccontextmanager
+from pydantic import BaseModel
+import asyncio
+from typing import Optional, Dict, Any, List
+import logging
 
-# Import routes
-from backend.routes.auth_routes import router as auth_router
-from backend.routes.chatbot_routes import router as chatbot_router
+# FIXED: Import the correct semantic processor
+from backend.logic.semantic_query_processor import process_query as semantic_process_query
+from backend.database.connect_cassandra import get_session
 
-# Import services for initialization
-from backend.llm.llama_integration import LlamaLLM
-from backend.database.connect_cassandra import initialize_database
-# Global variables for services
-llama_service = None
+app = FastAPI(title="Dynamic Academic Query API", version="2.0.0")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print(f"🔍 CASSANDRA_HOST: {os.getenv('CASSANDRA_HOST')}")
-    print(f"🔍 OLLAMA_HOST: {os.getenv('OLLAMA_HOST')}")
-    """Application lifespan manager for startup and shutdown tasks"""
-    
-    # Startup
-    print("🚀 Starting University AI System...")
-    
-    # Initialize database connection
-    try:
-        await initialize_database()
-        print("✅ Database connection established")
-    except Exception as e:
-        print(f"❌ Database initialization failed: {e}")
-        raise
-    
-    # Initialize LLM service
-    global llama_service
-    try:
-        ollama_host = os.getenv('OLLAMA_HOST', 'localhost')
-        ollama_port = os.getenv('OLLAMA_PORT', '11434')
-        base_url = f"http://{ollama_host}:{ollama_port}"
-        
-        print(f"🔧 Initializing LLM with URL: {base_url}")  # Debug line
-        
-        llama_service = LlamaLLM(
-            base_url=base_url,
-            model=os.getenv('LLAMA_MODEL', 'llama3.2')
-        )
-        
-        # Check if LLM service is available
-        if llama_service.check_health():
-            print("✅ Llama LLM service is ready")
-        else:
-            print("⚠️  Llama LLM service not ready, will retry on first use")
-            
-    except Exception as e:
-        print(f"❌ LLM service initialization failed: {e}")
-    
-    print("🎉 Application startup complete!")
-    
-    yield
-    
-    # Shutdown
-    print("🛑 Shutting down University AI System...")
-    print("✅ Shutdown complete")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Create FastAPI application
-app = FastAPI(
-    title="University AI Assistant",
-    description="AI-powered chatbot for university data queries with natural language processing",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# Configure CORS
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(auth_router, prefix="/api", tags=["Authentication"])
-app.include_router(chatbot_router, prefix="/api", tags=["Chatbot"])
+# Request models
+class QueryRequest(BaseModel):
+    query: str
+    userid: str  # Changed from user_id to match your existing API
+    role: str = "admin"  # Changed from user_role to match your existing API
+    session_id: Optional[str] = None
+
+class BatchQueryRequest(BaseModel):
+    queries: List[str]
+    userid: str
+    role: str = "admin"
+
+# Response models
+class QueryResponse(BaseModel):
+    success: bool
+    message: str
+    data: List[Dict[str, Any]]
+    count: int
+    error: bool
+    query: str
+    intent: str
+    execution_time: float
+    processor_used: Optional[str] = None
+    semantic_entities: Optional[Dict[str, Any]] = None
+
+# Initialize system on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the system on startup"""
+    logger.info("🚀 Starting Dynamic Academic Query API...")
+    try:
+        # Test database connection
+        session = get_session()
+        logger.info("✅ Database connection successful")
+        
+        # Import and initialize semantic processor
+        from backend.logic.semantic_query_processor import get_semantic_processor
+        processor = get_semantic_processor()
+        logger.info("✅ Semantic processor initialized")
+        
+        logger.info("🎯 System startup complete!")
+        
+    except Exception as e:
+        logger.error(f"❌ Startup failed: {e}")
+        raise
 
 # Health check endpoint
-@app.get("/")
-async def root():
-    """Root endpoint for health check"""
-    return {
-        "message": "University AI Assistant API",
-        "status": "running",
-        "version": "1.0.0"
-    }
-
 @app.get("/health")
-async def health_check():
-    """Detailed health check for all services"""
-    
-    health_status = {
-        "api": "healthy",
-        "database": "unknown",
-        "llm": "unknown",
-        "overall": "healthy"
-    }
-    
-    # Check database
+async def health():
+    """Health check endpoint"""
     try:
-        from backend.database.connect_cassandra import session
-        session.execute("SELECT COUNT(*) FROM students LIMIT 1")
-        health_status["database"] = "healthy"
-    except Exception as e:
-        health_status["database"] = f"unhealthy: {str(e)}"
-        health_status["overall"] = "degraded"
-    
-    # Check LLM service
-    try:
-        if llama_service and llama_service.check_health():
-            health_status["llm"] = "healthy"
-        else:
-            health_status["llm"] = "unhealthy: service not available"
-            health_status["overall"] = "degraded"
-    except Exception as e:
-        health_status["llm"] = f"unhealthy: {str(e)}"
-        health_status["overall"] = "degraded"
-    
-    return health_status
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    """Global exception handler"""
-    print(f"❌ Unhandled exception: {exc}")
-    import traceback
-    traceback.print_exc()
-    
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "message": "An unexpected error occurred",
-            "debug": str(exc) if os.getenv("API_DEBUG", "false").lower() == "true" else None
+        # Test database connection
+        session = get_session()
+        
+        # Test semantic processor
+        from backend.logic.semantic_query_processor import get_semantic_processor
+        processor = get_semantic_processor()
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "semantic_processor": "initialized",
+            "timestamp": str(asyncio.get_event_loop().time())
         }
-    )
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": str(asyncio.get_event_loop().time())
+        }
 
-# Development server configuration
-if __name__ == "__main__":
-    port = int(os.getenv("API_PORT", 8000))
-    host = os.getenv("API_HOST", "0.0.0.0")
-    debug = os.getenv("API_DEBUG", "true").lower() == "true"
+# Main query endpoint (semantic processor)
+@app.post("/api/chatbot", response_model=QueryResponse)
+async def chatbot_endpoint(request: QueryRequest):
+    """
+    Process a single query using the semantic system
     
-    uvicorn.run(
-        "main:app",
-        host=host,
-        port=port,
-        reload=debug,
-        log_level="info"
-    )
+    Examples:
+    - "count active students"
+    - "how many currently enrolled students"
+    - "my math grade"
+    - "students with CGPA > 3.0"
+    """
+    try:
+        logger.info(f"Processing query: '{request.query}' for user {request.userid} ({request.role})")
+        
+        result = await semantic_process_query(
+            query=request.query,
+            user_id=request.userid,
+            user_role=request.role
+        )
+        
+        logger.info(f"Query processed successfully. Count: {result.get('count', 0)}")
+        return QueryResponse(**result)
+        
+    except Exception as e:
+        logger.error(f"Query processing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
+
+# Alternative query endpoint with different naming
+@app.post("/query", response_model=QueryResponse)
+async def process_query_endpoint(request: QueryRequest):
+    """Alternative endpoint with different naming convention"""
+    return await chatbot_endpoint(request)
+
+# Batch query endpoint
+@app.post("/batch_query")
+async def process_batch_queries(request: BatchQueryRequest):
+    """
+    Process multiple queries in batch
+    """
+    try:
+        results = []
+        
+        for query in request.queries:
+            try:
+                result = await semantic_process_query(
+                    query=query,
+                    user_id=request.userid,
+                    user_role=request.role
+                )
+                results.append({
+                    "query": query,
+                    "result": result,
+                    "status": "success"
+                })
+            except Exception as e:
+                results.append({
+                    "query": query,
+                    "error": str(e),
+                    "status": "failed"
+                })
+        
+        return {
+            "batch_results": results,
+            "total_queries": len(request.queries),
+            "successful": sum(1 for r in results if r["status"] == "success"),
+            "failed": sum(1 for r in results if r["status"] == "failed")
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch processing failed: {str(e)}")
+
+# System status endpoint
+@app.get("/system/status")
+async def system_status():
+    """Get detailed system status"""
+    try:
+        from backend.logic.semantic_query_processor import get_semantic_processor
+        from backend.constants.subjects_index import SUBJECT_CANONICAL
+        
+        processor = get_semantic_processor()
+        session = get_session()
+        
+        return {
+            "status": "operational",
+            "components": {
+                "semantic_processor": "initialized",
+                "database": "connected",
+                "subject_index": f"{len(SUBJECT_CANONICAL)} subjects loaded"
+            },
+            "capabilities": [
+                "Natural language query processing",
+                "Subject grade lookup",
+                "Student filtering and counting",
+                "CGPA-based queries",
+                "Entity resolution"
+            ]
+        }
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "error": str(e)
+        }
+
+# Test query endpoint
+@app.get("/test")
+async def test_queries():
+    """Test the system with sample queries"""
+    
+    test_queries = [
+        {
+            "query": "count active students",
+            "userid": "admin",
+            "role": "admin"
+        },
+        {
+            "query": "how many currently enrolled students",
+            "userid": "admin", 
+            "role": "admin"
+        },
+        {
+            "query": "count all students",
+            "userid": "admin",
+            "role": "admin"
+        },
+        {
+            "query": "my math grade",
+            "userid": "ST001",
+            "role": "student"
+        }
+    ]
+    
+    results = []
+    for test_case in test_queries:
+        try:
+            result = await semantic_process_query(
+                query=test_case["query"],
+                user_id=test_case["userid"],
+                user_role=test_case["role"]
+            )
+            results.append({
+                "test_case": test_case,
+                "result": {
+                    "success": result.get("success"),
+                    "count": result.get("count"),
+                    "intent": result.get("intent"),
+                    "processor_used": result.get("processor_used")
+                },
+                "status": "success"
+            })
+        except Exception as e:
+            results.append({
+                "test_case": test_case,
+                "error": str(e),
+                "status": "failed"
+            })
+    
+    return {
+        "test_results": results,
+        "total_tests": len(test_queries),
+        "passed": sum(1 for r in results if r["status"] == "success"),
+        "failed": sum(1 for r in results if r["status"] == "failed"),
+        "system_ready": all(r["status"] == "success" for r in results)
+    }
+
+# Debug endpoint for development
+@app.get("/debug/entities/{query}")
+async def debug_entity_resolution(query: str):
+    """Debug endpoint to see entity resolution"""
+    try:
+        from backend.logic.entity_resolver import resolve_entities
+        entities = resolve_entities(query)
+        return {
+            "query": query,
+            "entities": entities
+        }
+    except Exception as e:
+        return {
+            "query": query,
+            "error": str(e)
+        }
+
+# Legacy compatibility endpoint (if needed)
+@app.post("/chatbot/query")
+async def legacy_query_endpoint(request: QueryRequest):
+    """Legacy endpoint for backwards compatibility"""
+    return await chatbot_endpoint(request)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

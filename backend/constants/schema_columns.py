@@ -55,7 +55,7 @@ COLUMN_TYPES = {
     "financialaid": str,
     "gender": str,
     "graduated": bool,
-    "ic": str,
+    "ic": int,
     "name": str,
     "overallcavg": float,
     "overallcgpa": float,

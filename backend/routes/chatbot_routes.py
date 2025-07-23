@@ -1,20 +1,56 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
-from backend.logic.query_processor import handle_chatbot_query
+import logging
 
+# UPDATED: Import from semantic processor instead
+from backend.logic.semantic_query_processor import process_query
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class QueryRequest(BaseModel):
     query: str
     userid: str
-    role: str
+    role: str = "admin"
+    page: int = 1  # Optional pagination
+    page_size: int = 100  # Optional pagination
 
 @router.post("/chatbot")
 async def chatbot_endpoint(payload: QueryRequest):
+    """Handle natural language queries with semantic understanding"""
     try:
-        return await handle_chatbot_query(payload.query, payload.userid, payload.role)
+        # Use semantic processor with proper parameter names
+        result = await process_query(
+            query=payload.query,
+            user_id=payload.userid,  # Note: process_query expects user_id, not userid
+            user_role=payload.role,
+            page=payload.page,
+            page_size=payload.page_size
+        )
+        
+        # Return consistent response format
+        return {
+            "status": "success",
+            "data": result
+        }
+        
     except Exception as e:
+        logger.error(f"Chatbot endpoint error: {e}")
         import traceback
         traceback.print_exc()
-        return JSONResponse({"error": str(e)}, status_code=500)
+        
+        return JSONResponse(
+            {
+                "status": "error", 
+                "message": str(e),
+                "data": {
+                    "success": False,
+                    "error": True,
+                    "message": f"System error: {str(e)}",
+                    "query": payload.query,
+                    "intent": "error"
+                }
+            }, 
+            status_code=500
+        )
