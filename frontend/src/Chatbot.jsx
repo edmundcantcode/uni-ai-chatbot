@@ -31,21 +31,45 @@ const apiService = {
       }
       
       const data = await response.json();
+      console.log("RAW_FROM_SERVER 👉", data);
       
-      return {
-        status: 'success',
-        data: data
-      };
+      return data; // <-- now askQuery gets {success:true, message:'...', data:[...], ...}
     } catch (error) {
       console.error('API call failed:', error);
       return {
-        status: 'error',
+        success: false,
         message: error.message,
-        data: {}
+        data: [],
+        error: true
       };
     }
   }
 };
+
+// Helper function to build human-readable text from response data
+function buildBotText(d) {
+  if (!d) return "Query processed.";
+  if (d.message) return d.message;
+  
+  // nested count: d.data => [ [ {count:2129} ], {…meta…} ]
+  const nestedCount = Array.isArray(d.data) && Array.isArray(d.data[0]) && d.data[0][0]?.count;
+  const count = typeof d.count === "number" ? d.count : nestedCount;
+  
+  if (typeof count === "number") {
+    const noun = /active|enrolled|current/i.test(d.intent || "") ? "currently enrolled students" : "students";
+    return `📊 **${count.toLocaleString()}** ${noun}.`;
+  }
+  
+  if (Array.isArray(d.data)) {
+    // if it is the [rows, meta] pattern, show rows length
+    const rows = Array.isArray(d.data[0]) ? d.data[0] : d.data;
+    if (Array.isArray(rows)) {
+      return `📋 Returned ${rows.length.toLocaleString()} rows.`;
+    }
+  }
+  
+  return "Query processed.";
+}
 
 export default function EnhancedChatbot({ user = { userid: "demo", role: "student" }, onLogout = () => {} }) {
   const [query, setQuery] = useState("");
@@ -71,8 +95,42 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
   };
 
   useEffect(() => {
+    console.log("MESSAGES STATE ▶", messages);
     scrollToBottom();
   }, [messages]);
+
+  // Unwrapping helper for backend responses
+  const unwrapBackend = (r) => {
+    // r is whatever apiService.sendQuery returned
+    if (!r) return null;
+    if (r.success !== undefined) return r; // already real payload
+    if (r.data && r.data.success !== undefined) return r.data; // unwrap {status:'success', data:{…}}
+    return r.data || r; // last resort
+  };
+
+  const buildBotText = (d) => {
+    if (!d) return "Query processed.";
+    if (d.message) return d.message;
+    
+    // nested count: d.data => [ [ {count:2129} ], {…meta…} ]
+    const nestedCount = Array.isArray(d.data) && Array.isArray(d.data[0]) && d.data[0][0]?.count;
+    const count = typeof d.count === "number" ? d.count : nestedCount;
+    
+    if (typeof count === "number") {
+      const noun = /active|enrolled|current/i.test(d.intent || "") ? "currently enrolled students" : "students";
+      return `📊 **${count.toLocaleString()}** ${noun}.`;
+    }
+    
+    if (Array.isArray(d.data)) {
+      // if it is the [rows, meta] pattern, show rows length
+      const rows = Array.isArray(d.data[0]) ? d.data[0] : d.data;
+      if (Array.isArray(rows)) {
+        return `📋 Returned ${rows.length.toLocaleString()} rows.`;
+      }
+    }
+    
+    return "Query processed.";
+  };
 
   const askQuery = async (queryText = null, clarification = null) => {
     const currentQuery = queryText || query.trim();
@@ -96,58 +154,38 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
 
     try {
       // Call the API service
-      const response = await apiService.sendQuery(currentQuery, user.userid, user.role, clarification);
+      const raw = await apiService.sendQuery(currentQuery, user.userid, user.role, clarification);
+      console.log("RAW_FROM_SERVER 👉", raw);
       
-      // Handle response format
-      let botMessage;
+      const payload = unwrapBackend(raw);
+      console.log("UNWRAPPED_PAYLOAD 👉", payload);
       
-      if (response.status === 'success' && response.data) {
-        const data = response.data;
-        
-        // Check if this is a disambiguation request
-        if (data.intent === 'clarify_column' && data.options) {
-          setPendingClarification({
-            query: currentQuery,
-            options: data.options,
-            ambiguous_terms: data.ambiguous_terms || [],
-            message: data.message
-          });
-          
-          botMessage = {
-            id: Date.now() + 1,
-            type: 'bot',
-            content: data.message || "I need clarification to process your query.",
-            data: data,
-            needsClarification: true,
-            timestamp: new Date()
-          };
-        } else {
-          botMessage = {
-            id: Date.now() + 1,
-            type: 'bot',
-            content: data.message || "Query processed successfully.",
-            data: data,
-            success: data.success,
-            timestamp: new Date()
-          };
-        }
-      } else if (response.status === 'error') {
-        botMessage = {
-          id: Date.now() + 1,
-          type: 'bot',
-          content: response.message || "An error occurred.",
-          data: response.data || {},
-          isError: true,
-          timestamp: new Date()
-        };
-      } else {
-        botMessage = {
-          id: Date.now() + 1,
-          type: 'bot',
-          content: response.message || "Query processed.",
-          data: response.data || response,
-          timestamp: new Date()
-        };
+      const needsClarification = payload?.intent === "clarify_column" && payload?.options;
+      const botText = needsClarification
+        ? (payload.message || "I need clarification to process your query.")
+        : buildBotText(payload);
+      
+      const botMessage = {
+        id: Date.now() + 1,
+        type: 'bot',
+        content: botText,
+        data: payload,
+        needsClarification,
+        success: payload?.success,
+        isError: raw?.status === 'error' || payload?.error,
+        timestamp: new Date()
+      };
+      
+      console.log("BOT_MESSAGE_BEFORE_SET ▶", botMessage);
+      
+      // Handle clarification
+      if (needsClarification && payload?.options) {
+        setPendingClarification({
+          query: currentQuery,
+          options: payload.options,
+          ambiguous_terms: payload.ambiguous_terms || [],
+          message: payload.message
+        });
       }
       
       setMessages(prev => [...prev, botMessage]);
@@ -948,12 +986,21 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
                   renderFormattedMessage(message.content, message.data, message.needsClarification)
                 )}
                 
-                {/* Data display for bot messages */}
-                {message.data && message.data.data && Array.isArray(message.data.data) && (
-                  <div style={styles.dataContainer}>
-                    {renderTable(message.data.data)}
-                  </div>
-                )}
+                {/* Data display for bot messages - improved table data detection */}
+                {message.data && (() => {
+                  const tableCandidate = message.data?.data;
+                  const tableData = Array.isArray(tableCandidate) && Array.isArray(tableCandidate[0]) 
+                    ? tableCandidate[0] // first element is the rows array
+                    : Array.isArray(tableCandidate) 
+                    ? tableCandidate 
+                    : null;
+                  
+                  return tableData && (
+                    <div style={styles.dataContainer}>
+                      {renderTable(tableData)}
+                    </div>
+                  );
+                })()}
               </div>
               <div style={{
                 ...styles.timestamp,

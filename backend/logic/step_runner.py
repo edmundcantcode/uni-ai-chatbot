@@ -372,6 +372,16 @@ def run_step(session, step: Dict[str, Any], id_pool: Optional[List[int]] = None)
         total_metadata["python_filtered"] = True
         total_metadata["python_filters"] = python_filters
     
+    # 🔧 CRITICAL FIX: Handle COUNT(*) queries properly
+    is_count_query = any("COUNT(" in str(col).upper() for col in select_cols)
+    if is_count_query:
+        count_val = all_rows[0].get('count', 0) if all_rows else 0
+        logger.info(f"COUNT query result: {count_val}")
+        total_metadata["count_value"] = count_val
+        total_metadata["is_count_query"] = True
+        # Return structured count result
+        return [{"count": count_val}], {**total_metadata, "count": count_val}
+    
     # Log warnings
     if total_metadata["warnings"]:
         for warning in total_metadata["warnings"]:
