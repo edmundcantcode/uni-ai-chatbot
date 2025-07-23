@@ -1,60 +1,49 @@
 import React, { useState, useRef, useEffect } from "react";
 
-// Mock API service for demo - replace with actual implementation
+// Real API service - no mock data
 const apiService = {
   async sendQuery(query, userid, role, clarification = null) {
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    const url = "http://localhost:8000/api/chatbot";  // Fixed endpoint
     
-    // Mock ambiguous response
-    if (query.toLowerCase().includes("computer science") && !clarification) {
-      return {
-        status: 'success',
-        data: {
-          success: false,
-          intent: "clarify_column",
-          message: "Did you mean programme or subject for 'Computer Science'?",
-          options: [
-            {
-              column: "programme",
-              value: "Bachelor of Science (Honours) in Computer Science",
-              description: "The academic degree programme"
-            },
-            {
-              column: "subjectname", 
-              value: "Computer Science Fundamentals",
-              description: "A specific subject/course"
-            }
-          ],
-          raw_query: query,
-          ambiguous_terms: [
-            {
-              phrase: "Computer Science",
-              programme: "Bachelor of Science (Honours) in Computer Science",
-              subjectname: "Computer Science Fundamentals",
-              scores: { subjectname: 85, programme: 87 }
-            }
-          ]
-        }
-      };
+    const requestBody = {
+      query: query,
+      userid: userid,
+      role: role
+    };
+    
+    // Add clarification if provided
+    if (clarification) {
+      requestBody.clarification = clarification;  // Backend expects 'clarification' field
     }
     
-    // Mock successful response after clarification
-    return {
-      status: 'success',
-      data: {
-        success: true,
-        intent: "count_students",
-        message: "📊 **Student Count Results**\n\n🎓 Found **1,247** students in Bachelor of Science (Honours) in Computer Science\n\n👥 Active students: **1,156**\n📚 Total graduates: **91**",
-        count: 1247,
-        execution_time: 0.234,
-        semantic_entities: {
-          programme: "Bachelor of Science (Honours) in Computer Science",
-          table_hint: "students"
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-        data: []
+        body: JSON.stringify(requestBody),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
       }
-    };
+      
+      const data = await response.json();
+      
+      return {
+        status: 'success',
+        data: data
+      };
+    } catch (error) {
+      console.error('API call failed:', error);
+      return {
+        status: 'error',
+        message: error.message,
+        data: {}
+      };
+    }
   }
 };
 
@@ -74,7 +63,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
   const inputRef = useRef(null);
   const [connectionError, setConnectionError] = useState(false);
   
-  // NEW: State for handling clarifications
+  // State for handling clarifications
   const [pendingClarification, setPendingClarification] = useState(null);
 
   const scrollToBottom = () => {
@@ -106,10 +95,10 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     setPendingClarification(null);
 
     try {
-      // Call the semantic query processor API
+      // Call the API service
       const response = await apiService.sendQuery(currentQuery, user.userid, user.role, clarification);
       
-      // Handle semantic processor response format
+      // Handle response format
       let botMessage;
       
       if (response.status === 'success' && response.data) {
@@ -156,7 +145,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
           id: Date.now() + 1,
           type: 'bot',
           content: response.message || "Query processed.",
-          data: response,
+          data: response.data || response,
           timestamp: new Date()
         };
       }
@@ -169,7 +158,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
       const errorMessage = {
         id: Date.now() + 1,
         type: 'bot',
-        content: `❌ ${err.message.includes('fetch') ? 'Unable to connect to server. Please check if the backend is running.' : err.message}`,
+        content: `❌ ${err.message.includes('fetch') ? 'Unable to connect to server. Please check if the backend is running on port 8000.' : err.message}`,
         isError: true,
         timestamp: new Date()
       };
@@ -180,7 +169,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     setTimeout(() => inputRef.current?.focus(), 100);
   };
 
-  // NEW: Handle clarification choice
+  // Handle clarification choice
   const handleClarification = async (choice) => {
     if (!pendingClarification) return;
     
@@ -196,10 +185,8 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     
     // Send clarification back to backend
     const clarificationPayload = {
-      clarify: {
-        column: choice.column,
-        value: choice.value
-      }
+      column: choice.column,
+      value: choice.value
     };
     
     await askQuery(pendingClarification.query, clarificationPayload);
@@ -263,7 +250,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     };
   };
 
-  // NEW: Render clarification options
+  // Render clarification options
   const renderClarificationOptions = (options) => {
     return (
       <div style={styles.clarificationContainer}>
@@ -353,7 +340,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
           })}
         </div>
         
-        {/* NEW: Clarification Options */}
+        {/* Clarification Options */}
         {needsClarification && data && data.options && (
           renderClarificationOptions(data.options)
         )}
@@ -645,7 +632,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
       color: '#495057'
     },
     
-    // NEW: Clarification styles
+    // Clarification styles
     clarificationContainer: {
       marginTop: '16px',
       padding: '16px',

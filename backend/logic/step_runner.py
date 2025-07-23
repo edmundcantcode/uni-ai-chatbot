@@ -2,12 +2,52 @@
 from typing import List, Dict, Any, Iterable, Tuple, Optional, Union
 from cassandra.query import SimpleStatement
 import logging
+import sys
+import re
+
+# CRITICAL: Setup logging for this module
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s:%(lineno)d - %(message)s",
+    stream=sys.stdout,
+    force=True
+)
 
 logger = logging.getLogger(__name__)
 
 # Constants
 MAX_IN_LIST_SIZE = 200  # Cassandra's practical limit for IN clauses
 DEFAULT_PAGE_SIZE = 100
+
+# Status normalization constants
+CANONICAL_ACTIVE = {"active", "enrolled", "current", "student"}
+
+def normalize_status(s: str) -> str:
+    """Normalize status strings for matching"""
+    if not s:
+        return ""
+    return re.sub(r"[^a-z]", "", s.lower())
+
+def get_active_status_values(session):
+    """Load real active status values from database"""
+    try:
+        rows = session.execute("SELECT DISTINCT status FROM students")
+        active_statuses = []
+        
+        for row in rows:
+            if not row.status:
+                continue
+            
+            normalized = normalize_status(row.status)
+            if any(canonical in normalized for canonical in CANONICAL_ACTIVE):
+                active_statuses.append(row.status)
+        
+        # Fallback if no matches found
+        return active_statuses or ["Active", "Enrolled", "Current"]
+        
+    except Exception as e:
+        logger.warning(f"Could not load status values: {e}")
+        return ["Active", "Enrolled", "Current"]
 
 class QueryOperator:
     """Supported query operators"""
@@ -16,7 +56,7 @@ class QueryOperator:
     GTE = ">="
     LT = "<"
     LTE = "<="
-    NE = "!="
+    NE = "!="  # Note: Cassandra doesn't support !=, will need Python filtering
     IN = "IN"
     BETWEEN = "BETWEEN"
     CONTAINS = "CONTAINS"  # Will need Python post-processing
@@ -75,12 +115,12 @@ def build_where_clause(where: Dict[str, Any]) -> Tuple[str, List[Any], List[str]
                     logger.warning(f"BETWEEN requires 2 values, got {val}")
                     
             elif op in [QueryOperator.GT, QueryOperator.GTE, QueryOperator.LT, 
-                       QueryOperator.LTE, QueryOperator.NE]:
+                       QueryOperator.LTE]:
                 clauses.append(f"{col} {op} ?")
                 params.append(val)
                 
-            elif op in [QueryOperator.CONTAINS, QueryOperator.LIKE]:
-                # These need Python post-processing
+            elif op in [QueryOperator.NE, QueryOperator.CONTAINS, QueryOperator.LIKE]:
+                # These need Python post-processing (Cassandra doesn't support != directly)
                 python_filters.append({
                     "column": col,
                     "op": op,
@@ -118,14 +158,18 @@ def apply_python_filters(rows: List[Dict[str, Any]], filters: List[Dict[str, Any
             val = f["value"]
             row_val = row.get(col)
             
-            if op == QueryOperator.CONTAINS:
+            if op == QueryOperator.NE:
+                if row_val == val:
+                    include_row = False
+                    break
+                    
+            elif op == QueryOperator.CONTAINS:
                 if row_val is None or str(val).lower() not in str(row_val).lower():
                     include_row = False
                     break
                     
             elif op == QueryOperator.LIKE:
                 # Simple LIKE implementation (% wildcards)
-                import re
                 pattern = val.replace("%", ".*").replace("_", ".")
                 if row_val is None or not re.match(pattern, str(row_val), re.IGNORECASE):
                     include_row = False
@@ -149,9 +193,8 @@ def execute_query_once(session, table: str, select_cols: List[str],
     
     cql = f"SELECT {select_str} FROM {table} WHERE {where_clause}{limit_clause}{allow_clause}"
     
-    # Log for debugging
-    logger.debug(f"Executing CQL: {cql}")
-    logger.debug(f"With params: {params}")
+    # 🔥 CRITICAL LOGGING: Log the exact CQL and params
+    logger.info("CQL ▶ %s params=%s", cql, params)
     
     # Execute query with auto-retry
     warnings = []
@@ -161,6 +204,9 @@ def execute_query_once(session, table: str, select_cols: List[str],
             result = session.execute(prepared, params)
         else:
             result = session.execute(SimpleStatement(cql))
+        
+        # 🔧 CRITICAL FIX: Convert to list immediately and store in separate variable
+        raw_rows = list(result)
         
         if hasattr(result, 'warnings') and result.warnings:
             warnings = result.warnings
@@ -179,9 +225,9 @@ def execute_query_once(session, table: str, select_cols: List[str],
         logger.error(f"Query execution failed: {e}")
         raise
     
-    # Convert to list of dicts (rest of function stays the same)
+    # 🔧 CRITICAL FIX: Convert to list of dicts using raw_rows (NOT result)
     rows = []
-    for r in result:
+    for r in raw_rows:
         row_dict = {}
         for col in r._fields:
             val = getattr(r, col)
@@ -193,11 +239,26 @@ def execute_query_once(session, table: str, select_cols: List[str],
                 row_dict[col] = str(val)
         rows.append(row_dict)
     
+    # 🔧 SPECIAL HANDLING: Detect COUNT queries and extract count value
+    is_count_query = any("COUNT(" in str(col).upper() for col in select_cols)
+    count_value = None
+    
+    if is_count_query and rows:
+        # Cassandra returns COUNT as 'count' column
+        count_value = rows[0].get('count', 0)
+        logger.info(f"COUNT query result: {count_value}")
+    
+    # 🔥 CRITICAL LOGGING: Log the row count returned
+    logger.info("ROWS ◀ %d for table=%s select=%s where=%s", 
+               len(rows), table, select_cols, where_clause)
+    
     metadata = {
         "row_count": len(rows),
         "warnings": warnings,
         "cql": cql,
-        "truncated": limit and len(rows) == limit
+        "truncated": limit and len(rows) == limit,
+        "is_count_query": is_count_query,
+        "count_value": count_value
     }
     
     return rows, metadata
@@ -205,22 +266,11 @@ def execute_query_once(session, table: str, select_cols: List[str],
 def run_step(session, step: Dict[str, Any], id_pool: Optional[List[int]] = None) -> List[Dict[str, Any]]:
     """
     Execute a query step with enhanced operator support and chunking.
-    
-    Step format:
-    {
-        "table": "students",
-        "select": ["id", "name", "overallcgpa"],
-        "where": {
-            "overallcgpa": {"op": ">", "value": 3.0},
-            "programme": {"op": "IN", "value": ["CS", "IT"]},
-            "name": {"op": "CONTAINS", "value": "John"}  # Python filter
-        },
-        "limit": 100,
-        "offset": 0,  # For pagination
-        "allow_filtering": true,
-        "where_in_ids_from_step": 0  # Use IDs from previous step
-    }
     """
+    
+    # 🔥 CRITICAL LOGGING: Log the incoming step
+    logger.info("STEP ▶ table=%s select=%s where=%s limit=%s", 
+               step.get("table"), step.get("select"), step.get("where"), step.get("limit"))
     
     # Extract step components
     table = step["table"]
@@ -233,6 +283,19 @@ def run_step(session, step: Dict[str, Any], id_pool: Optional[List[int]] = None)
     # Handle ID pool from previous step
     if step.get("where_in_ids_from_step") is not None and id_pool is not None:
         where["id"] = {"op": "IN", "value": id_pool}
+    
+    # 🔧 STATUS NORMALIZATION: If filtering by status with our hardcoded values, try to get real ones
+    if "status" in where:
+        status_spec = where["status"]
+        if isinstance(status_spec, dict) and status_spec.get("op") == "IN":
+            hardcoded_active = ["Active", "Enrolled", "Current"]
+            if status_spec.get("value") == hardcoded_active:
+                try:
+                    real_active_statuses = get_active_status_values(session)
+                    where["status"]["value"] = real_active_statuses
+                    logger.info(f"🔄 Updated status filter to real values: {real_active_statuses}")
+                except Exception as e:
+                    logger.warning(f"Could not load real status values: {e}")
     
     # Build WHERE clause with operator support
     where_clause, params, python_filters = build_where_clause(where)
@@ -256,7 +319,9 @@ def run_step(session, step: Dict[str, Any], id_pool: Optional[List[int]] = None)
         "row_count": 0,
         "warnings": [],
         "cql_queries": [],
-        "truncated": False
+        "truncated": False,
+        "is_count_query": False,
+        "count_value": None
     }
     
     if needs_chunking:
@@ -279,6 +344,13 @@ def run_step(session, step: Dict[str, Any], id_pool: Optional[List[int]] = None)
             total_metadata["warnings"].extend(metadata["warnings"])
             total_metadata["cql_queries"].append(metadata["cql"])
             
+            # Handle count queries across chunks
+            if metadata["is_count_query"]:
+                if total_metadata["count_value"] is None:
+                    total_metadata["count_value"] = 0
+                total_metadata["count_value"] += metadata["count_value"] or 0
+                total_metadata["is_count_query"] = True
+            
             # Stop if we've hit the limit
             if limit and len(all_rows) >= limit:
                 all_rows = all_rows[:limit]
@@ -291,7 +363,7 @@ def run_step(session, step: Dict[str, Any], id_pool: Optional[List[int]] = None)
             params, limit, allow_filtering, offset
         )
         all_rows = rows
-        total_metadata = metadata
+        total_metadata.update(metadata)
     
     # Apply Python filters if needed
     if python_filters:
@@ -305,10 +377,9 @@ def run_step(session, step: Dict[str, Any], id_pool: Optional[List[int]] = None)
         for warning in total_metadata["warnings"]:
             logger.warning(f"Cassandra warning: {warning}")
     
-    # Store metadata in rows (optional - for debugging)
-    if all_rows and logger.isEnabledFor(logging.DEBUG):
-        logger.debug(f"Query returned {len(all_rows)} rows")
-        logger.debug(f"Metadata: {total_metadata}")
+    # 🔥 FINAL LOGGING: Log what we're returning
+    logger.info("STEP ◀ returning %d rows for table=%s (count_value=%s)", 
+               len(all_rows), table, total_metadata.get("count_value"))
     
     return all_rows
 
@@ -340,5 +411,7 @@ __all__ = [
     'validate_step',
     'QueryOperator',
     'MAX_IN_LIST_SIZE',
-    'DEFAULT_PAGE_SIZE'
+    'DEFAULT_PAGE_SIZE',
+    'get_active_status_values',
+    'normalize_status'
 ]

@@ -1,11 +1,21 @@
 # main.py or app.py - Main application integration
 
+# CRITICAL: Setup logging FIRST before any other imports
+import logging
+import sys
+logging.basicConfig(
+    level=logging.INFO,  # Change to DEBUG for even more detail
+    format="%(asctime)s %(levelname)s %(name)s:%(lineno)d - %(message)s",
+    stream=sys.stdout,
+    force=True
+)
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
 from typing import Optional, Dict, Any, List
-import logging
+import json
 
 # FIXED: Import the correct semantic processor
 from backend.logic.semantic_query_processor import process_query as semantic_process_query
@@ -13,8 +23,7 @@ from backend.database.connect_cassandra import get_session
 
 app = FastAPI(title="Dynamic Academic Query API", version="2.0.0")
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# Setup logger for this module
 logger = logging.getLogger(__name__)
 
 # CORS middleware
@@ -110,7 +119,9 @@ async def chatbot_endpoint(request: QueryRequest):
     - "students with CGPA > 3.0"
     """
     try:
-        logger.info(f"Processing query: '{request.query}' for user {request.userid} ({request.role})")
+        # 🔥 CRITICAL LOGGING: Log incoming request
+        logger.info("🔥 INCOMING REQUEST ▶ query='%s' userid='%s' role='%s'", 
+                   request.query, request.userid, request.role)
         
         result = await semantic_process_query(
             query=request.query,
@@ -118,11 +129,21 @@ async def chatbot_endpoint(request: QueryRequest):
             user_role=request.role
         )
         
-        logger.info(f"Query processed successfully. Count: {result.get('count', 0)}")
+        # 🔥 CRITICAL LOGGING: Log final result before sending to UI
+        logger.info("🔥 FINAL RESPONSE ◀ success=%s count=%s len(data)=%s intent=%s", 
+                   result.get("success"), result.get("count"), 
+                   len(result.get("data", [])), result.get("intent"))
+        
+        # 🔥 CRITICAL LOGGING: Log first few rows if any data
+        if result.get("data") and len(result["data"]) > 0:
+            logger.info("🔥 SAMPLE DATA ◀ first_row=%s", json.dumps(result["data"][0], default=str))
+        else:
+            logger.info("🔥 NO DATA ◀ result.data=%s", result.get("data"))
+        
         return QueryResponse(**result)
         
     except Exception as e:
-        logger.error(f"Query processing failed: {e}")
+        logger.error(f"❌ Query processing failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
 
 # Alternative query endpoint with different naming
@@ -287,4 +308,16 @@ async def legacy_query_endpoint(request: QueryRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    
+    # 🔥 CRITICAL: Set environment variable for unbuffered output
+    import os
+    os.environ["PYTHONUNBUFFERED"] = "1"
+    
+    logger.info("🚀 Starting uvicorn server...")
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000, 
+        reload=True,
+        log_level="info"  # Ensure uvicorn also logs at INFO level
+    )

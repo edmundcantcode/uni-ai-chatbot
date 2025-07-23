@@ -1,67 +1,75 @@
 # backend/constants/subjects_index.py
 import re
-from typing import Optional, List, Dict, Tuple
-from rapidfuzz import process, fuzz
 import logging
 from functools import lru_cache
+from typing import Optional, List, Dict
+from rapidfuzz import process, fuzz
+from cassandra.query import SimpleStatement
 
 logger = logging.getLogger(__name__)
 
-# This will be populated from database on startup
+# In‑memory caches
 ALL_SUBJECT_ROWS: List[Dict[str, str]] = []
 SUBJECT_CANONICAL: List[str] = []
 SUBJECT_LOOKUP: Dict[str, Dict[str, str]] = {}  # canonical -> full row
 
+# ------------------------- Canonicalization ------------------------- #
+
 def canonicalize(s: str) -> str:
     """
-    Convert natural language to canonical form.
+    Convert a natural-language subject string to a CamelCase-ish canonical form.
     "operating system fundamentals" -> "OperatingSystemFundamentals"
     """
-    # Extract alphanumeric words and capitalize each
     words = re.findall(r"[A-Za-z0-9]+", s)
     return "".join(w.capitalize() for w in words)
 
-def load_subjects_from_db(session):
-    """Load all subjects from database into memory"""
+# ------------------------- DB Loader ------------------------- #
+
+def load_subjects_from_db(session) -> None:
+    """
+    Load all subjects into memory. Avoids SELECT DISTINCT (illegal for non-PK cols).
+    We scan the table and dedupe in Python.
+    """
     global ALL_SUBJECT_ROWS, SUBJECT_CANONICAL, SUBJECT_LOOKUP
-    
+
     try:
-        # Query all unique subject names
-        query = "SELECT DISTINCT subjectname FROM subjects ALLOW FILTERING"
-        result = session.execute(query)
-        
-        ALL_SUBJECT_ROWS = []
-        for row in result:
-            if row.subjectname:
-                subject_data = {
-                    "subjectname": row.subjectname,
-                    "canonical": row.subjectname  # Already in canonical form in DB
-                }
-                ALL_SUBJECT_ROWS.append(subject_data)
-        
-        # Build canonical list and lookup
-        SUBJECT_CANONICAL = [r["subjectname"] for r in ALL_SUBJECT_ROWS]
-        SUBJECT_LOOKUP = {r["subjectname"]: r for r in ALL_SUBJECT_ROWS}
-        
+        stmt = SimpleStatement("SELECT subjectname FROM subjects", fetch_size=5000)
+        seen = set()
+        rows_local: List[Dict[str, str]] = []
+
+        for row in session.execute(stmt):
+            name = getattr(row, "subjectname", None)
+            if not name:
+                continue
+            name = name.strip()
+            if name in seen:
+                continue
+            seen.add(name)
+
+            canon = canonicalize(name)
+            rows_local.append({"subjectname": name, "canonical": canon})
+
+        ALL_SUBJECT_ROWS = rows_local
+        SUBJECT_CANONICAL = [r["canonical"] for r in rows_local]
+        SUBJECT_LOOKUP = {r["canonical"]: r for r in rows_local}
+
         logger.info(f"✅ Loaded {len(SUBJECT_CANONICAL)} unique subjects into memory")
-        
-        # Log some examples
-        if SUBJECT_CANONICAL:
-            logger.debug(f"Example subjects: {SUBJECT_CANONICAL[:5]}")
-            
+
+        if not SUBJECT_CANONICAL:
+            logger.warning("No subjects loaded from DB; falling back to hardcoded list.")
+            _load_fallback_subjects()
+
     except Exception as e:
         logger.error(f"Failed to load subjects: {e}")
-        # Fallback to hardcoded examples
         _load_fallback_subjects()
 
-def _load_fallback_subjects():
-    """Load fallback subject data for testing"""
+def _load_fallback_subjects() -> None:
+    """Fallback list so system still runs."""
     global ALL_SUBJECT_ROWS, SUBJECT_CANONICAL, SUBJECT_LOOKUP
-    
-    # Common CS subjects as examples
+
     fallback_subjects = [
         "OperatingSystemFundamentals",
-        "DataStructuresAndAlgorithms", 
+        "DataStructuresAndAlgorithms",
         "DatabaseManagementSystems",
         "ComputerNetworks",
         "SoftwareEngineering",
@@ -84,126 +92,105 @@ def _load_fallback_subjects():
         "Statistics",
         "ProbabilityTheory",
         "NumericalMethods",
-        "PhysicsForEngineers"
+        "PhysicsForEngineers",
     ]
-    
+
     ALL_SUBJECT_ROWS = [{"subjectname": s, "canonical": s} for s in fallback_subjects]
     SUBJECT_CANONICAL = fallback_subjects
     SUBJECT_LOOKUP = {s: {"subjectname": s, "canonical": s} for s in fallback_subjects}
-    
+
     logger.warning(f"Using {len(SUBJECT_CANONICAL)} fallback subjects")
+
+# ------------------------- Matching ------------------------- #
 
 @lru_cache(maxsize=1000)
 def best_subject_match(user_text: str, threshold: int = 70) -> Optional[str]:
     """
-    Find best matching canonical subject name using fuzzy matching.
-    
-    Args:
-        user_text: Natural language subject name (e.g., "operating system fundamentals")
-        threshold: Minimum similarity score (0-100) - lowered to 70 for better matching
-    
-    Returns:
-        Canonical subject name or None if no good match
+    Return the best matching canonical subject name using fuzzy matching.
+    Cached by (user_text, threshold) implicitly because threshold is default-stable.
     """
     if not SUBJECT_CANONICAL:
         logger.warning("Subject index not loaded")
         return None
-    
-    # First try exact match after canonicalization
+
     canonical_input = canonicalize(user_text)
+
+    # Exact canonical match
     if canonical_input in SUBJECT_CANONICAL:
-        logger.debug(f"Exact match found: '{user_text}' -> '{canonical_input}'")
+        logger.debug(f"Exact match: '{user_text}' -> '{canonical_input}'")
         return canonical_input
-    
-    # Try quick abbreviation match
+
+    # Quick abbreviation match
     quick = quick_match(user_text)
     if quick:
         return quick
-    
-    # Fuzzy match using token_set_ratio for better robustness
+
+    # Fuzzy (token_set_ratio handles order/duplicates)
     result = process.extractOne(
-        canonical_input, 
-        SUBJECT_CANONICAL, 
-        scorer=fuzz.token_set_ratio  # Better for word order variations
+        canonical_input,
+        SUBJECT_CANONICAL,
+        scorer=fuzz.token_set_ratio
     )
-    
     if result:
         match, score, _ = result
-        logger.debug(f"Fuzzy match: '{user_text}' -> '{match}' (score: {score})")
-        
+        logger.debug(f"Fuzzy match: '{user_text}' -> '{match}' (score {score})")
         if score >= threshold:
             return match
-    
-    # Try partial ratio as fallback
+
+    # Partial ratio fallback on raw text
     result = process.extractOne(
-        user_text.lower(),  # Use original text lowercase
+        user_text.lower(),
         [s.lower() for s in SUBJECT_CANONICAL],
         scorer=fuzz.partial_ratio
     )
-    
     if result:
         match, score, idx = result
         if score >= threshold:
             return SUBJECT_CANONICAL[idx]
-    
-    # Try token-based matching as final fallback
+
+    # Token-based Jaccard fallback
     match = _token_based_match(user_text)
     if match:
         logger.debug(f"Token match: '{user_text}' -> '{match}'")
         return match
-    
-    logger.debug(f"No match found for: '{user_text}' (threshold: {threshold})")
+
+    logger.debug(f"No subject match for '{user_text}' (threshold {threshold})")
     return None
 
 def _token_based_match(user_text: str) -> Optional[str]:
-    """
-    Token-based matching for better handling of word order variations.
-    "system operating fundamentals" matches "OperatingSystemFundamentals"
-    """
+    """Token Jaccard similarity over CamelCase splits."""
     user_tokens = set(re.findall(r"\w+", user_text.lower()))
     if len(user_tokens) < 2:
         return None
-    
-    best_match = None
-    best_score = 0
-    
+
+    best_match, best_score = None, 0.0
     for subject in SUBJECT_CANONICAL:
-        # Extract tokens from canonical form
         subject_tokens = set(re.findall(r"[A-Z][a-z]*|[0-9]+", subject))
         subject_tokens_lower = {t.lower() for t in subject_tokens}
-        
-        # Calculate Jaccard similarity
-        intersection = len(user_tokens & subject_tokens_lower)
+
+        inter = len(user_tokens & subject_tokens_lower)
         union = len(user_tokens | subject_tokens_lower)
-        
-        if union > 0:
-            score = intersection / union
-            if score > best_score and score >= 0.6:  # 60% token overlap
-                best_score = score
-                best_match = subject
-    
+        if union == 0:
+            continue
+
+        score = inter / union
+        if score > best_score and score >= 0.6:
+            best_score, best_match = score, subject
+
     return best_match
 
 def get_subject_variations(canonical_name: str) -> List[str]:
-    """Get common variations of a subject name for better matching"""
+    """Return common textual variations for better matching."""
     if canonical_name not in SUBJECT_LOOKUP:
         return [canonical_name]
-    
-    # Generate variations
+
     variations = [canonical_name]
-    
-    # Split camelCase into words
+
     words = re.findall(r"[A-Z][a-z]*|[0-9]+", canonical_name)
-    
-    # Natural language version
     natural = " ".join(words).lower()
     variations.append(natural)
-    
-    # With "and" instead of "And"
-    natural_with_and = natural.replace(" and ", " & ")
-    variations.append(natural_with_and)
-    
-    # Common abbreviations
+    variations.append(natural.replace(" and ", " & "))
+
     abbrev_map = {
         "fundamentals": "101",
         "introduction": "intro",
@@ -212,39 +199,36 @@ def get_subject_variations(canonical_name: str) -> List[str]:
         "application": "app",
         "computer": "comp",
         "engineering": "eng",
-        "mathematics": "math"
+        "mathematics": "math",
     }
-    
     for full, short in abbrev_map.items():
         if full in natural:
             variations.append(natural.replace(full, short))
-    
+
     return variations
 
 def find_subjects_containing(keyword: str) -> List[str]:
-    """Find all subjects containing a keyword"""
-    keyword_lower = keyword.lower()
+    """Find canonical names containing the keyword (loose)."""
+    kw = keyword.lower()
     matches = []
-    
-    for subject in SUBJECT_CANONICAL:
-        subject_lower = subject.lower()
-        if keyword_lower in subject_lower:
-            matches.append(subject)
+
+    for subj in SUBJECT_CANONICAL:
+        subj_low = subj.lower()
+        if kw in subj_low:
+            matches.append(subj)
             continue
-        
-        # Check word boundaries
-        words = re.findall(r"[A-Z][a-z]*", subject)
-        if any(keyword_lower in word.lower() for word in words):
-            matches.append(subject)
-    
+
+        words = re.findall(r"[A-Z][a-z]*", subj)
+        if any(kw in w.lower() for w in words):
+            matches.append(subj)
+
     return matches
 
-# Precomputed common mappings for speed
 COMMON_MAPPINGS = {
     "os": "OperatingSystemFundamentals",
-    "ds": "DataStructures",
-    "algo": "Algorithms",
-    "db": "Database",
+    "ds": "DataStructuresAndAlgorithms",
+    "algo": "DataStructuresAndAlgorithms",
+    "db": "DatabaseManagementSystems",
     "dbms": "DatabaseManagementSystems",
     "ai": "ArtificialIntelligence",
     "ml": "MachineLearning",
@@ -254,31 +238,27 @@ COMMON_MAPPINGS = {
     "cn": "ComputerNetworks",
     "cg": "ComputerGraphics",
     "web": "WebDevelopment",
-    "mobile": "MobileApplicationDevelopment"
+    "mobile": "MobileApplicationDevelopment",
 }
 
 def quick_match(user_text: str) -> Optional[str]:
-    """Quick matching for common abbreviations"""
-    user_lower = user_text.lower().strip()
-    
-    # Direct abbreviation match
-    if user_lower in COMMON_MAPPINGS:
-        canonical = COMMON_MAPPINGS[user_lower]
+    """Fast path for common abbreviations."""
+    key = user_text.lower().strip()
+    if key in COMMON_MAPPINGS:
+        canonical = COMMON_MAPPINGS[key]
         if canonical in SUBJECT_CANONICAL:
             return canonical
-        # Try to find it with fuzzy match
+        # If mapping wasn’t actually loaded, try fuzzy
         return best_subject_match(canonical, threshold=90)
-    
     return None
 
-# Export main functions
 __all__ = [
-    'canonicalize',
-    'best_subject_match',
-    'load_subjects_from_db',
-    'find_subjects_containing',
-    'get_subject_variations',
-    'quick_match',
-    'SUBJECT_CANONICAL',
-    'SUBJECT_LOOKUP'
+    "canonicalize",
+    "best_subject_match",
+    "load_subjects_from_db",
+    "find_subjects_containing",
+    "get_subject_variations",
+    "quick_match",
+    "SUBJECT_CANONICAL",
+    "SUBJECT_LOOKUP",
 ]
