@@ -162,7 +162,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
       
       const needsClarification = payload?.intent === "clarify_column" && payload?.options;
       const botText = needsClarification
-        ? (payload.message || "I need clarification to process your query.")
+        ? (payload?.message ?? "I need clarification to process your query.")
         : buildBotText(payload);
       
       const botMessage = {
@@ -172,7 +172,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
         data: payload,
         needsClarification,
         success: payload?.success,
-        isError: raw?.status === 'error' || payload?.error,
+        isError: payload?.error || payload?.success === false,
         timestamp: new Date()
       };
       

@@ -24,11 +24,18 @@ logging.basicConfig(
 )
 
 # FIXED: Use relative imports within the logic package
-from .entity_resolver import (
-    resolve_entities,
-    enhance_step_with_entities, 
-    fix_subject_names_in_step,
-)
+from .entity_resolver import resolve_entities, canonicalize_plan_steps
+
+# Explicit column lists (Cassandra hates "*")
+SELECT_STUDENTS = ["id","name","programme","overallcgpa","cohort","status","graduated"]
+SELECT_SUBJECTS = ["id","subjectname","grade","overallpercentage","examyear","exammonth"]
+
+# Safe integer conversion utility
+def _safe_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 from .step_runner import run_step, get_active_status_values
 
 logger = logging.getLogger(__name__)
@@ -107,19 +114,17 @@ def _safe_captures(m: re.Match) -> Dict[str, str]:
         return {}
     return {f"group_{i}": m.group(i) for i in range(1, m.lastindex + 1)}
 
-# Intent detection keywords and helpers
-LIST_WORDS = ("list", "show", "display", "give me", "show me", "retrieve")
-COUNT_WORDS = ("count", "how many", "total", "number of")
+# Intent detection keywords and helpers - FIXED: Use word boundaries
+LIST_WORDS = (r"\blist\b", r"\bshow\b", r"\bdisplay\b", r"\bgive me\b", r"\bshow me\b", r"\bretrieve\b")
+COUNT_WORDS = (r"\bcount\b", r"\bhow many\b", r"\btotal\b", r"\bnumber of\b")
 
 def wants_list(q: str) -> bool:
     """Check if user wants a list of records (not a count)"""
-    ql = q.lower()
-    return any(w in ql for w in LIST_WORDS) and not any(w in ql for w in COUNT_WORDS)
+    return any(re.search(w, q, re.I) for w in LIST_WORDS) and not any(re.search(w, q, re.I) for w in COUNT_WORDS)
 
 def wants_count(q: str) -> bool:
     """Check if user wants a count (not a list)"""
-    ql = q.lower()
-    return any(w in ql for w in COUNT_WORDS)
+    return any(re.search(w, q, re.I) for w in COUNT_WORDS)
 
 # ============================================================================
 # SEMANTIC PATTERNS
@@ -282,16 +287,50 @@ class SemanticQueryProcessor:
         self,
         query: str,
         user_id: str,
-        user_role: str
+        user_role: str,
+        pre_resolved_entities: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Process query with LLM-first approach and semantic fallbacks"""
         
         start_time = time.time()
         
         try:
-            # Step 1: Entity resolution (keep)
-            entities = resolve_entities(query)
-            logger.info(f"🧠 Resolved entities: {entities}")
+            # Step 1: Entity resolution (or use pre-resolved)
+            if pre_resolved_entities:
+                entities = pre_resolved_entities
+                logger.info(f"🧠 Using pre-resolved entities: {entities}")
+            else:
+                entities = resolve_entities(query)
+                logger.info(f"🧠 Resolved entities: {entities}")
+            
+            # 🔴 SHORT-CIRCUIT FOR DISAMBIGUATION (before LLM/patterns)
+            if entities.get("needs_disambiguation"):
+                opts = []
+                for amb in entities["ambiguous_terms"]:
+                    if amb.get("best_programme"):
+                        opts.append({
+                            "column": "programme",
+                            "value": amb["best_programme"],
+                            "description": amb["phrase"]
+                        })
+                    if amb.get("best_subject"):
+                        opts.append({
+                            "column": "subjectname", 
+                            "value": amb["best_subject"],
+                            "description": amb["phrase"]
+                        })
+                
+                # 🔧 DEBUG LOGGING: Add requested logging
+                logger.info("CLARIFY OPTS %s", opts)
+                
+                return {
+                    "success": True,
+                    "intent": "clarify_column",
+                    "message": "I found a term that could be a **programme** or a **subject**. Please pick one:",
+                    "options": opts,
+                    "ambiguous_terms": entities["ambiguous_terms"],
+                    "execution_time": time.time() - start_time
+                }
             
             # 👉 NEW: Try LLM FIRST (before patterns)
             if self.llm:
@@ -314,14 +353,9 @@ class SemanticQueryProcessor:
                         analysis_result["intent"] = "list_students"
                         logger.info(f"🔄 Converted LLM plan to list_students intent")
                     
-                    # Enhance with entities
-                    steps = analysis_result.get("steps", [])
-                    for i, step in enumerate(steps):
-                        # Force allow_filtering for now
-                        step.setdefault("allow_filtering", True)
-                        step = enhance_step_with_entities(step, entities)
-                        step = fix_subject_names_in_step(step)
-                        steps[i] = step
+                    # One-shot cleanup using centralized canonicalizer
+                    entities.update({"user_id": user_id, "user_role": user_role})
+                    analysis_result = canonicalize_plan_steps(analysis_result, entities)
                     
                     analysis_result["query"] = query
                     analysis_result["start_time"] = start_time
@@ -444,7 +478,7 @@ class SemanticQueryProcessor:
             handler = "handle_list_students"
         elif intent.startswith("list_") and wants_count(query):
             logger.info("🔁 Overriding list intent to count due to query phrasing")
-            intent = "count_students"
+            intent = "count_all_students"
             handler = "handle_count_students"
         
         # Security check for students
@@ -463,16 +497,20 @@ class SemanticQueryProcessor:
                     start_time
                 )
             
+            uid = _safe_int(user_id)
             steps = [{
                 "table": "subjects",
                 "select": ["id", "subjectname", "grade", "overallpercentage"],
                 "where": {
-                    "id": {"op": "=", "value": int(user_id)},
                     "subjectname": {"op": "=", "value": subject}
                 },
                 "limit": 10,
                 "allow_filtering": True
             }]
+            
+            # Add ID filter only for valid user IDs
+            if uid is not None:
+                steps[0]["where"]["id"] = {"op": "=", "value": uid}
             
             plan = {
                 "intent": "get_subject_grade",
@@ -482,23 +520,31 @@ class SemanticQueryProcessor:
                 "start_time": start_time
             }
             
+            # Use centralized canonicalizer
+            entities.update({"user_id": user_id, "user_role": user_role})
+            steps = canonicalize_plan_steps({"steps": steps}, entities)["steps"]
+            
             logger.debug("FINAL SUBJECT GRADE PLAN >>> %s", json.dumps(plan, indent=2, default=str))
             
         elif handler == "handle_list_student_subjects":
             # NEW: Handle listing subjects for a specific student
-            sid = int(captures.get("group_1", user_id))  # Use captured student ID or default to current user
+            uid = _safe_int(captures.get("group_1", user_id))  # Use captured student ID or default to current user
             
             step = {
                 "table": "subjects",
                 "select": ["id", "subjectname", "grade", "overallpercentage", "examyear", "exammonth"],
-                "where": {"id": {"op": "=", "value": sid}},
+                "where": {},
                 "limit": 200,
                 "allow_filtering": True
             }
             
+            # Add ID filter only if we have a valid numeric ID
+            if uid is not None:
+                step["where"]["id"] = {"op": "=", "value": uid}
+            
             plan = {
                 "intent": "list_student_subjects",
-                "entities": {"id": sid},
+                "entities": {"id": uid} if uid is not None else {},
                 "steps": [step],
                 "query": query,
                 "start_time": start_time
@@ -507,6 +553,20 @@ class SemanticQueryProcessor:
             logger.info("📋 Built student subjects plan: %s", plan)
             logger.debug("FINAL STUDENT SUBJECTS PLAN >>> %s", json.dumps(plan, indent=2, default=str))
             
+            return await execute_plan(plan, user_id, user_role, self.llm)
+            
+        elif handler == "handle_cohort_filter":
+            step = {"table":"students","select":SELECT_STUDENTS,"where":{},"limit":100,"allow_filtering":True}
+            plan = {"intent":"filter_by_cohort","entities":entities,"steps":[step],"query":query,"start_time":start_time}
+            entities.update({"user_id":user_id,"user_role":user_role})
+            plan = canonicalize_plan_steps(plan, entities)
+            return await execute_plan(plan, user_id, user_role, self.llm)
+            
+        elif handler == "handle_subject_search":
+            step = {"table":"subjects","select":SELECT_SUBJECTS,"where":{},"limit":100,"allow_filtering":True}
+            plan = {"intent":"search_subjects","entities":entities,"steps":[step],"query":query,"start_time":start_time}
+            entities.update({"user_id":user_id,"user_role":user_role})
+            plan = canonicalize_plan_steps(plan, entities)
             return await execute_plan(plan, user_id, user_role, self.llm)
             
         elif handler == "handle_cgpa_filter":
@@ -534,7 +594,10 @@ class SemanticQueryProcessor:
                 "start_time": start_time
             }
             
+            ctx_entities = {**entities, "user_id": user_id, "user_role": user_role}
+            plan = canonicalize_plan_steps(plan, ctx_entities)
             logger.debug("FINAL CGPA FILTER PLAN >>> %s", json.dumps(plan, indent=2, default=str))
+            return await execute_plan(plan, user_id, user_role, self.llm)
             
         elif handler == "handle_count_students":
             where = {}
@@ -561,9 +624,9 @@ class SemanticQueryProcessor:
                 "allow_filtering": True
             }
             
-            # Apply entity filters (programme, cohort, etc.)
-            step = enhance_step_with_entities(step, entities)
-            step = fix_subject_names_in_step(step)
+            # Apply entity filters using centralized canonicalizer
+            entities.update({"user_id": user_id, "user_role": user_role})
+            step = canonicalize_plan_steps({"steps":[step]}, entities)["steps"][0]
             
             steps = [step]
             
@@ -610,9 +673,9 @@ class SemanticQueryProcessor:
                     "allow_filtering": True
                 }
                 
-                # Re-apply entity filters
-                fallback_step = enhance_step_with_entities(fallback_step, entities)
-                fallback_step = fix_subject_names_in_step(fallback_step)
+                # Re-apply entity filters using centralized canonicalizer
+                entities.update({"user_id": user_id, "user_role": user_role})
+                fallback_step = canonicalize_plan_steps({"steps":[fallback_step]}, entities)["steps"][0]
                 
                 fallback_plan = {
                     "intent": intent,
@@ -659,15 +722,6 @@ class SemanticQueryProcessor:
                 step["where"]["status"] = {"op": "IN", "value": real_active_statuses}
                 logger.info(f"Using real active statuses for list: {real_active_statuses}")
             
-            # 🔧 APPLY ALL ENTITY FILTERS (this was missing!)
-            step = enhance_step_with_entities(step, entities)
-            step = fix_subject_names_in_step(step)
-            
-            # 🔧 ENSURE NO COUNT(*) SLIPS IN
-            if step.get("select") == ["COUNT(*)"]:
-                logger.warning("⚠️ COUNT(*) detected in list handler, fixing...")
-                step["select"] = ["id", "name", "programme", "overallcgpa", "cohort", "status", "graduated"]
-            
             # 🔧 FORCE LIST INTENT (not count)
             plan = {
                 "intent": "list_students",  # Hard-set to ensure UI treats as list
@@ -677,8 +731,9 @@ class SemanticQueryProcessor:
                 "start_time": start_time
             }
             
-            # 🔧 REMOVE ANY POST_AGGREGATION
-            plan.pop("post_aggregation", None)
+            # Use centralized canonicalizer
+            entities.update({"user_id": user_id, "user_role": user_role})
+            plan = canonicalize_plan_steps(plan, entities)
             
             logger.info(f"📋 Built list plan with filters: {plan}")
             logger.debug("FINAL LIST PLAN >>> %s", json.dumps(plan, indent=2, default=str))
@@ -736,16 +791,18 @@ class SemanticQueryProcessor:
         
         # If we have a subject name, assume grade query
         if entities.get("subjectname"):
+            uid = _safe_int(user_id)
+            step_where = {"subjectname": {"op": "=", "value": entities["subjectname"]}}
+            if uid is not None:
+                step_where["id"] = {"op": "=", "value": uid}
+                
             return {
                 "intent": "get_subject_grade",
                 "entities": entities,
                 "steps": [{
                     "table": "subjects",
                     "select": ["id", "subjectname", "grade", "overallpercentage"],
-                    "where": {
-                        "id": {"op": "=", "value": int(user_id)},
-                        "subjectname": {"op": "=", "value": entities["subjectname"]}
-                    },
+                    "where": step_where,
                     "limit": 10,
                     "allow_filtering": True
                 }]
@@ -772,24 +829,21 @@ class SemanticQueryProcessor:
             
             steps = [{
                 "table": table,
-                "select": ["COUNT(*)"] if is_count_query else ["*"],
+                "select": ["COUNT(*)"] if is_count_query else (SELECT_STUDENTS if table=="students" else SELECT_SUBJECTS),
                 "where": {},
                 "limit": None if is_count_query else 100,
                 "allow_filtering": True
             }]
             
-            # Apply entity enhancements
-            steps[0] = enhance_step_with_entities(steps[0], entities)
-            
-            # Add user constraint for students
-            if user_role == "student" and table in ["students", "subjects"]:
-                steps[0]["where"]["id"] = {"op": "=", "value": int(user_id)}
-            
-            return {
+            # Use centralized canonicalizer
+            entities.update({"user_id": user_id, "user_role": user_role})
+            plan = {
                 "intent": "count_query" if is_count_query else "list_students",
                 "entities": entities,
                 "steps": steps
             }
+            plan = canonicalize_plan_steps(plan, entities)
+            return plan
         
         return None
 
@@ -813,14 +867,36 @@ async def process_query(
     user_id: str,
     user_role: str = "admin",
     page: int = 1,
-    page_size: int = 100
+    page_size: int = 100,
+    clarification: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Main entry point for semantic query processing"""
     
     processor = get_semantic_processor()
     
+    # Handle clarification by pre-resolving entities
+    pre_resolved_entities = None
+    if clarification:
+        logger.info(f"🎯 Processing clarification: {clarification}")
+        # Run entity resolver once to have a base dict
+        entities = resolve_entities(query)
+        
+        if clarification["column"] == "programme":
+            entities.setdefault("filters", {})["programme"] = clarification["value"]
+            entities["force_programme"] = True
+        else:  # subjectname
+            entities["subjectname"] = clarification["value"]
+            entities["force_subject"] = True
+        
+        # Remove disambiguation flags
+        entities.pop("needs_disambiguation", None)
+        entities.pop("ambiguous_terms", None)
+        
+        pre_resolved_entities = entities
+        logger.info(f"🔧 Pre-resolved entities after clarification: {pre_resolved_entities}")
+    
     # Process query with LLM-first approach
-    result = await processor.process_with_semantics(query, user_id, user_role)
+    result = await processor.process_with_semantics(query, user_id, user_role, pre_resolved_entities)
     
     # Apply pagination if requested
     if page > 1 or page_size != 100:

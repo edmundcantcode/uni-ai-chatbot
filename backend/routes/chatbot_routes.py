@@ -13,8 +13,8 @@ class QueryRequest(BaseModel):
     query: str
     userid: str
     role: str = "admin"
-    page: int = 1  # Optional pagination
-    page_size: int = 100  # Optional pagination
+    page: int = 1  
+    page_size: int = 100  
 
 @router.post("/chatbot")
 async def chatbot_endpoint(payload: QueryRequest):
@@ -23,7 +23,7 @@ async def chatbot_endpoint(payload: QueryRequest):
         # Use semantic processor with proper parameter names
         result = await process_query(
             query=payload.query,
-            user_id=payload.userid,  # Note: process_query expects user_id, not userid
+            user_id=payload.userid,  
             user_role=payload.role,
             page=payload.page,
             page_size=payload.page_size

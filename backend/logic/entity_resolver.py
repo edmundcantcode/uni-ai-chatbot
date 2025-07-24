@@ -162,10 +162,24 @@ def candidate_phrases(query: str) -> List[str]:
     cands = sorted(_ngrams(words, 1, 5), key=lambda x: -len(x))
     # dedupe maintaining order
     seen, uniq = set(), []
+    
+    STOP = {"in","of","for","from","to","on","the","a","an","that","which"}
+    
+    def trim(tokens):
+        while tokens and tokens[0] in STOP: 
+            tokens = tokens[1:]
+        while tokens and tokens[-1] in STOP: 
+            tokens = tokens[:-1]
+        return tokens
+    
     for c in cands:
-        if c not in seen and len(c) >= 3:  # discard tiny tokens
-            uniq.append(c)
-            seen.add(c)
+        toks = trim(c.split())
+        if len(toks) < 2:
+            continue
+        phrase = " ".join(toks)
+        if phrase not in seen:
+            uniq.append(phrase)
+            seen.add(phrase)
     return uniq
 
 # ---------- Classification (from first file) ----------
@@ -198,10 +212,14 @@ def classify_term(term: str) -> Dict[str, str]:
 def _cast_value(col: str, val):
     """Cast values to appropriate types for Cassandra columns."""
     if col in BOOLEAN_COLS:
+        TRUE_WORDS  = {"true","1","yes","y","t","active","enrolled"}
+        FALSE_WORDS = {"false","0","no","n","f","inactive","not enrolled"}
         if isinstance(val, bool):
             return val
         if isinstance(val, str):
-            return val.strip().lower() in ("true", "1", "yes", "y", "t", "active", "enrolled", "false", "0", "no", "n", "f")
+            v = val.strip().lower()
+            if   v in TRUE_WORDS:  return True
+            elif v in FALSE_WORDS: return False
         return bool(val)
     
     if col in INT_COLS:
@@ -213,6 +231,82 @@ def _cast_value(col: str, val):
     
     # Note: cohort normalization is now handled separately in enhance_step_with_entities
     return val
+
+# Safe integer conversion utility
+def _safe_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+# ---------- Constants for clean selects ----------
+SELECT_STUDENTS = ["id","name","programme","overallcgpa","cohort","status","graduated"]
+SELECT_SUBJECTS = ["id","subjectname","grade","overallpercentage","examyear","exammonth"]
+
+# ---------- Table Column Definitions ----------
+STUDENTS_COLS = {"id","name","programme","overallcgpa","cohort","status","graduated","gender","country","year"}
+SUBJECTS_COLS = {"id","subjectname","grade","overallpercentage","examyear","exammonth"}
+
+def prune_where_for_table(step: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove columns that don't belong to the target table"""
+    tbl = step.get("table","")
+    valid = STUDENTS_COLS if tbl == "students" else SUBJECTS_COLS
+    where = step.get("where", {})
+    step["where"] = {k:v for k,v in where.items() if k in valid}
+    return step
+
+def attach_student_filter_step(plan: Dict[str,Any]) -> Dict[str,Any]:
+    """If subject query needs cohort/status filters → add a student pre-step"""
+    if "steps" not in plan or len(plan["steps"]) != 1:
+        return plan
+    
+    s0 = plan["steps"][0]
+    if s0.get("table") != "subjects":
+        return plan
+    
+    move_keys = [k for k in list(s0.get("where",{})) if k not in SUBJECTS_COLS]
+    if not move_keys:
+        return plan  # nothing to move
+    
+    student_step = {
+        "table":"students",
+        "select":["id"],
+        "where": {k:s0["where"].pop(k) for k in move_keys},
+        "allow_filtering": True,
+        "limit": 5000
+    }
+    
+    plan["steps"] = [student_step, s0]
+    plan["steps"][1]["where_in_ids_from_step"] = 0
+    return plan
+
+def _fix_in(spec, col):
+    """Normalize IN operations to use 'values' key consistently"""
+    if spec.get("op","").upper()=="IN":
+        key = "values" if "values" in spec else "value"
+        if key == "value":
+            spec["values"] = spec.pop("value")
+        spec["values"] = [_cast_value(col,v) for v in spec["values"]]
+
+def normalize_ops(step):
+    """Clean broken ops (BETWEEN on booleans, etc.)"""
+    for col, spec in list(step.get("where", {}).items()):
+        if not isinstance(spec, dict):
+            continue
+        op = spec.get("op","=").upper()
+        val = spec.get("value")
+        
+        if col == "graduated":
+            step["where"][col] = {"op": "=", "value": bool(val)}
+        
+        if op == "BETWEEN":
+            if not isinstance(val, list) or len(val) != 2:
+                step["where"][col] = {"op": ">=", "value": val[0] if isinstance(val,list) else val}
+        
+        # Fix IN operations
+        _fix_in(spec, col)
+    
+    return step
 
 # ---------- Keywords and Constants (from second file) ----------
 # Keywords that suggest different tables
@@ -352,6 +446,19 @@ def resolve_entities(user_query: str) -> Dict[str, Any]:
             entities["table_hint"] = entities["table_hint"] or "subjects"
             logger.info(f"Pattern matched subject: '{subject}'")
     
+    # 4. Actually use your fuzzy subject index when no exact match
+    if not entities.get("subjectname"):
+        # try contains list
+        cand = find_subjects_containing(user_query)  # returns list
+        if len(cand) == 1:
+            entities["subjectname"] = cand[0]
+            logger.info(f"Fuzzy subject index matched: '{cand[0]}'")
+        elif len(cand) > 1:
+            entities["needs_disambiguation"] = True
+            entities["ambiguous_terms"] = [{"phrase": user_query, "subjectname": c, "scores": {}} for c in cand]
+            logger.info(f"Multiple subject matches found: {cand}")
+            return entities
+    
     # Extract filters and operators (from second file)
     filters, operators = _extract_filters(q_lower)
     entities["filters"].update(filters)
@@ -367,25 +474,30 @@ def resolve_entities(user_query: str) -> Dict[str, Any]:
     if country:
         entities["filters"]["country"] = country
     
-    # Fix subject/programme confusion: if we matched a programme, 
-    # drop any accidental subject match that might be similar
+    # 🔍 DEBUG: Check what we detected before disambiguation
+    logger.info(f"🔍 DEBUG: programme={entities.get('filters', {}).get('programme')}, subject={entities.get('subjectname')}")
+    
+    # If BOTH detected, make user choose
     if entities.get("filters", {}).get("programme") and entities.get("subjectname"):
-        logger.info(f"Removing conflicting subject '{entities['subjectname']}' in favor of programme '{entities['filters']['programme']}'")
-        del entities["subjectname"]
-        entities["table_hint"] = "students"
+        ambiguous_choices.append({
+            "phrase": entities["subjectname"],
+            "programme": entities["filters"]["programme"],
+            "subjectname": entities["subjectname"],
+            "scores": {"programme": 100, "subjectname": 100}  # fake high to show both
+        })
+        entities["ambiguous_terms"] = ambiguous_choices
+        entities["needs_disambiguation"] = True
+        logger.info("🔥 FORCING DISAMBIGUATION - both programme and subject detected")
+        logger.info(f"entities_final=%s", entities)
+        return entities
     
-    # Also check the inverse: if we matched a subject but accidentally put it in programme
-    elif entities.get("subjectname") and entities.get("filters", {}).get("programme"):
-        # This is less common but could happen
-        subj_confidence = canonicalize_subject(entities["subjectname"])
-        prog_confidence = canonicalize_programme(entities["filters"]["programme"])
-        
-        # If both are valid but subject is in programme field, we already handle this in enhance_step_with_entities
-        if subj_confidence and not prog_confidence:
-            logger.info(f"Moving invalid programme '{entities['filters']['programme']}' - keeping subject '{entities['subjectname']}'")
-            del entities["filters"]["programme"]
-            entities["table_hint"] = "subjects"
+    if ambiguous_choices:
+        entities["ambiguous_terms"] = ambiguous_choices
+        entities["needs_disambiguation"] = True
+        logger.info(f"entities_final=%s", entities)
+        return entities
     
+    logger.info(f"entities_final=%s", entities)
     return entities
 
 def _determine_table_hint(q_lower: str) -> Optional[str]:
@@ -650,7 +762,7 @@ def enhance_step_with_entities(step: Dict[str, Any], entities: Dict[str, Any]) -
             op = operators[field]
             where[actual_field] = {"op": op, "value": _cast_value(actual_field, value)}
         elif isinstance(value, list):
-            where[actual_field] = {"op": "IN", "value": [_cast_value(actual_field, v) for v in value]}
+            where[actual_field] = {"op": "IN", "values": [_cast_value(actual_field, v) for v in value]}
         else:
             where[actual_field] = {"op": "=", "value": _cast_value(actual_field, value)}
     
@@ -658,8 +770,10 @@ def enhance_step_with_entities(step: Dict[str, Any], entities: Dict[str, Any]) -
     for col, spec in where.items():
         if isinstance(spec, dict) and "value" in spec:
             spec["value"] = _cast_value(col, spec["value"])
-        elif isinstance(spec, dict) and "values" in spec:  # Handle IN operations
-            spec["values"] = [_cast_value(col, v) for v in spec["values"]]
+        elif isinstance(spec, dict):
+            if spec.get("op","").upper()=="IN":
+                key = "values" if "values" in spec else "value"
+                spec[key] = [_cast_value(col, v) for v in spec[key]]
     
     enhanced_step["where"] = where
     enhanced_step["allow_filtering"] = True  # keep current behaviour
@@ -726,13 +840,46 @@ def canonicalize_plan_steps(plan: Dict[str, Any], entities: Dict[str, Any]) -> D
     
     logger.debug("Canonicalizing plan with %d steps", len(plan["steps"]))
     
+    # Apply full cleanup pipeline to all steps
     for i, step in enumerate(plan["steps"]):
-        # First enhance with entities (handles canonicalization)
+        # Full cleanup pipeline
         plan["steps"][i] = enhance_step_with_entities(step, entities)
-        # Then fix any remaining subject/programme names
         plan["steps"][i] = fix_subject_names_in_step(plan["steps"][i])
+        plan["steps"][i] = prune_where_for_table(plan["steps"][i])
+        plan["steps"][i] = normalize_ops(plan["steps"][i])
         
         logger.debug("Step %d after canonicalization: %s", i, plan["steps"][i])
+    
+    # Handle multi-step plans: If any step is subjects but has student filters, add pre-steps
+    new_steps = []
+    for i, step in enumerate(plan["steps"]):
+        if step.get("table") == "subjects":
+            # Check if this step needs student filters moved to a pre-step
+            move_keys = [k for k in list(step.get("where",{})) if k not in SUBJECTS_COLS]
+            if move_keys:
+                # Create student pre-step
+                student_step = {
+                    "table":"students",
+                    "select":["id"],
+                    "where": {k:step["where"].pop(k) for k in move_keys},
+                    "allow_filtering": True,
+                    "limit": 5000
+                }
+                new_steps.append(student_step)
+                step["where_in_ids_from_step"] = len(new_steps) - 1
+        
+        new_steps.append(step)
+    
+    plan["steps"] = new_steps
+    
+    # Security: Add user ID constraint for students
+    user_id = entities.get("user_id")
+    user_role = entities.get("user_role")
+    uid = _safe_int(user_id)
+    if user_role == "student" and uid is not None:
+        for step in plan["steps"]:
+            if step.get("table") in ["students", "subjects"]:
+                step.setdefault("where", {})["id"] = {"op": "=", "value": uid}
     
     return plan
 
@@ -744,5 +891,11 @@ __all__ = [
     'canonicalize_programme',
     'canonicalize_subject', 
     'guess_domain',
-    'canonicalize_plan_steps'
+    'canonicalize_plan_steps',
+    'prune_where_for_table',
+    'attach_student_filter_step',
+    'normalize_ops',
+    'SELECT_STUDENTS',
+    'SELECT_SUBJECTS',
+    '_safe_int'
 ]
