@@ -10,9 +10,6 @@ import json
 import re
 import sys
 from typing import Dict, Any, List, Optional, Tuple
-from backend.llm.llama_integration import LlamaLLM
-from backend.database.connect_cassandra import get_session
-from backend.constants.subjects_index import load_subjects_from_db, SUBJECT_CANONICAL
 
 # CRITICAL: Setup logging first before any other imports
 import logging
@@ -23,8 +20,146 @@ logging.basicConfig(
     force=True
 )
 
-# FIXED: Use relative imports within the logic package
-from .entity_resolver import resolve_entities, canonicalize_plan_steps
+logger = logging.getLogger(__name__)
+
+def prune_unmentioned_filters(plan: Dict[str, Any], user_query: str) -> Dict[str, Any]:
+    """Remove filters for columns the user never mentioned - ENHANCED to handle nested filters"""
+    q_lower = user_query.lower()
+    
+    # Build allowed columns based on what's mentioned in query
+    allowed = set()
+    
+    # Always allow basic filters
+    allowed.update(["id", "allow_filtering"])
+    
+    # Check for mentions of specific columns
+    if any(word in q_lower for word in ["cohort", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
+        allowed.add("cohort")
+    if any(word in q_lower for word in ["active", "enrolled", "current", "status"]):
+        allowed.add("status")
+    if any(word in q_lower for word in ["graduated", "graduation"]):
+        allowed.add("graduated")
+    if any(word in q_lower for word in ["programme", "program", "computer science", "information technology", "cs", "it"]):
+        allowed.add("programme")
+    if any(word in q_lower for word in ["cgpa", "gpa"]):
+        allowed.add("overallcgpa")
+    if any(word in q_lower for word in ["gender", "male", "female", "men", "women"]):
+        allowed.add("gender")
+    if any(word in q_lower for word in ["country", "malaysia", "singapore", "india"]):
+        allowed.add("country")
+    if any(word in q_lower for word in ["subject", "grade", "score", "marks"]):
+        allowed.add("subjectname")
+    if any(word in q_lower for word in ["year", "2020", "2021", "2022", "2023", "2024"]):
+        allowed.update(["examyear", "year"])
+    
+    def strip_where(where: Dict[str, Any]):
+        """Helper to strip unwanted filters from where clauses"""
+        for col in list(where.keys()):
+            if col not in allowed:
+                logger.debug(f"Removing unmentioned filter: {col}")
+                where.pop(col, None)
+    
+    # Prune unmentioned filters from all steps
+    for step in plan.get("steps", []):
+        # Main where clause
+        strip_where(step.get("where", {}))
+        
+        # If the LLM put a nested where under post_aggregation
+        if "post_aggregation" in step and isinstance(step["post_aggregation"], dict):
+            strip_where(step["post_aggregation"].get("where", {}))
+    
+    return plan
+
+def remove_duplicate_steps(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove duplicate steps from plan"""
+    if "steps" not in plan:
+        return plan
+    
+    unique = []
+    for s in plan["steps"]:
+        if s not in unique:  # naive but works
+            unique.append(s)
+        else:
+            logger.debug("Removed duplicate step")
+    
+    plan["steps"] = unique
+    return plan
+
+# backend/logic/semantic_query_processor.py
+"""
+Enhanced query processor with LLM-first approach and semantic fallbacks.
+FIXED: Row iteration bug and status value normalization
+"""
+
+# backend/logic/semantic_query_processor.py
+"""
+Enhanced query processor with LLM-first approach and semantic fallbacks.
+FIXED: Row iteration bug and status value normalization
+"""
+
+import asyncio
+import time
+import json
+import re
+import sys
+from typing import Dict, Any, List, Optional, Tuple
+
+# CRITICAL: Setup logging first before any other imports
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s:%(lineno)d - %(message)s",
+    stream=sys.stdout,
+    force=True
+)
+
+logger = logging.getLogger(__name__)
+
+# FIXED: Move imports inside functions to avoid circular imports
+def get_llama_llm():
+    """Lazy import of LlamaLLM"""
+    try:
+        from backend.llm.llama_integration import LlamaLLM
+        return LlamaLLM
+    except ImportError as e:
+        logger.error(f"Failed to import LlamaLLM: {e}")
+        return None
+
+def get_cassandra_session():
+    """Lazy import of Cassandra session"""
+    try:
+        from backend.database.connect_cassandra import get_session
+        return get_session
+    except ImportError as e:
+        logger.error(f"Failed to import Cassandra session: {e}")
+        return None
+
+def get_subjects_utils():
+    """Lazy import of subjects utilities"""
+    try:
+        from backend.constants.subjects_index import load_subjects_from_db, SUBJECT_CANONICAL
+        return load_subjects_from_db, SUBJECT_CANONICAL
+    except ImportError as e:
+        logger.error(f"Failed to import subjects utils: {e}")
+        return None, {}
+
+def get_entity_resolver():
+    """Lazy import of entity resolver"""
+    try:
+        from .entity_resolver import resolve_entities, canonicalize_plan_steps
+        return resolve_entities, canonicalize_plan_steps
+    except ImportError as e:
+        logger.error(f"Failed to import entity resolver: {e}")
+        return None, None
+
+def get_step_runner():
+    """Lazy import of step runner"""
+    try:
+        from .step_runner import run_step, get_active_status_values
+        return run_step, get_active_status_values
+    except ImportError as e:
+        logger.error(f"Failed to import step runner: {e}")
+        return None, None
 
 # Explicit column lists (Cassandra hates "*")
 SELECT_STUDENTS = ["id","name","programme","overallcgpa","cohort","status","graduated"]
@@ -36,9 +171,6 @@ def _safe_int(v):
         return int(v)
     except (TypeError, ValueError):
         return None
-from .step_runner import run_step, get_active_status_values
-
-logger = logging.getLogger(__name__)
 
 # Cache for real status values
 _cached_active_statuses = None
@@ -46,8 +178,12 @@ _cached_active_statuses = None
 # Lazy import functions to avoid circular dependencies
 def get_enhanced_processor():
     """Lazy import of EnhancedQueryProcessor to avoid circular imports"""
-    from .query_processor import EnhancedQueryProcessor
-    return EnhancedQueryProcessor
+    try:
+        from .query_processor import EnhancedQueryProcessor
+        return EnhancedQueryProcessor
+    except ImportError as e:
+        logger.error(f"Failed to import EnhancedQueryProcessor: {e}")
+        return None
 
 def get_shared_functions():
     """Get shared functions from query_processor or core_executor"""
@@ -62,32 +198,33 @@ def get_shared_functions():
         )
         return execute_plan, create_error_response, create_security_error_response, format_response_message, PaginatedResponse
     except ImportError:
-        # Fallback to query_processor
-        from .query_processor import (
-            execute_plan,
-            create_error_response,
-            format_response_message,
-            PaginatedResponse
-        )
-        
-        # Create missing security error function
-        def create_security_error_response(query: str, user_role: str, start_time: float) -> Dict[str, Any]:
-            return {
-                "success": False,
-                "message": f"🔒 **Access Denied**\n\nAs a {user_role}, you can only access your own academic records.",
-                "data": [],
-                "count": 0,
-                "error": True,
-                "query": query,
-                "intent": "security_error",
-                "execution_time": time.time() - start_time,
-                "security_level": user_role
-            }
-        
-        return execute_plan, create_error_response, create_security_error_response, format_response_message, PaginatedResponse
-
-# Get the functions once at module level
-execute_plan, create_error_response, create_security_error_response, format_response_message, PaginatedResponse = get_shared_functions()
+        try:
+            # Fallback to query_processor
+            from .query_processor import (
+                execute_plan,
+                create_error_response,
+                format_response_message,
+                PaginatedResponse
+            )
+            
+            # Create missing security error function
+            def create_security_error_response(query: str, user_role: str, start_time: float) -> Dict[str, Any]:
+                return {
+                    "success": False,
+                    "message": f"🔒 **Access Denied**\n\nAs a {user_role}, you can only access your own academic records.",
+                    "data": [],
+                    "count": 0,
+                    "error": True,
+                    "query": query,
+                    "intent": "security_error",
+                    "execution_time": time.time() - start_time,
+                    "security_level": user_role
+                }
+            
+            return execute_plan, create_error_response, create_security_error_response, format_response_message, PaginatedResponse
+        except ImportError as e:
+            logger.error(f"Failed to import shared functions: {e}")
+            return None, None, None, None, None
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -99,9 +236,14 @@ def get_real_active_statuses():
     
     if _cached_active_statuses is None:
         try:
-            session = get_session()
-            _cached_active_statuses = get_active_status_values(session)
-            logger.info(f"✅ Cached active status values: {_cached_active_statuses}")
+            get_session = get_cassandra_session()
+            _, get_active_status_values = get_step_runner()
+            if get_session and get_active_status_values:
+                session = get_session()
+                _cached_active_statuses = get_active_status_values(session)
+                logger.info(f"✅ Cached active status values: {_cached_active_statuses}")
+            else:
+                raise Exception("Could not import required functions")
         except Exception as e:
             logger.warning(f"Could not load active status values: {e}")
             _cached_active_statuses = ["Active", "Enrolled", "Current"]  # Fallback
@@ -142,6 +284,34 @@ class SemanticRouter:
     """Router with semantic understanding"""
     
     PATTERNS = [
+        # "What are my grades?" → list_student_subjects
+        SemanticPattern(
+            r"(?:what|show|list)\s+(?:are\s+)?my\s+grades\b",
+            "list_student_subjects",
+            "handle_list_student_subjects"
+        ),
+        
+        # "What's my grade for X?" → get_subject_grade
+        SemanticPattern(
+            r"(?:what|show|get)(?:'s| is)?\s+my\s+grades?\s+for\s+(.+)",
+            "get_subject_grade",
+            "handle_subject_grade"
+        ),
+        
+        # "List subjects that I take" → list_student_subjects
+        SemanticPattern(
+            r"(?:list|show)\s+(?:all\s+)?subjects\s+(?:that\s+)?(?:I|i)\s+(?:take|am taking|am enrolled in|have)",
+            "list_student_subjects",
+            "handle_list_student_subjects"
+        ),
+        
+        # "Show my subjects" → list_student_subjects  
+        SemanticPattern(
+            r"(?:show|list|what are)\s+my\s+subjects\b",
+            "list_student_subjects",
+            "handle_list_student_subjects"
+        ),
+        
         # Subject grade queries
         SemanticPattern(
             r"(?:my |show |get )?(?:grade|score|marks?|result)s?\s+(?:for|in|of)\s+(.+)",
@@ -257,8 +427,12 @@ class SemanticQueryProcessor:
     def _initialize(self):
         """Initialize the processor"""
         try:
-            self.llm = LlamaLLM()
-            logger.info("✅ Semantic Query Processor initialized")
+            LlamaLLM = get_llama_llm()
+            if LlamaLLM:
+                self.llm = LlamaLLM()
+                logger.info("✅ Semantic Query Processor initialized")
+            else:
+                logger.warning("⚠️ LLM not available")
         except Exception as e:
             logger.error(f"⚠️ LLM initialization failed: {e}")
     
@@ -267,15 +441,20 @@ class SemanticQueryProcessor:
         """Lazy load enhanced processor"""
         if self._enhanced_processor is None:
             EnhancedProcessorClass = get_enhanced_processor()
-            self._enhanced_processor = EnhancedProcessorClass()
+            if EnhancedProcessorClass:
+                self._enhanced_processor = EnhancedProcessorClass()
         return self._enhanced_processor
     
     def _load_semantic_data(self):
         """Load semantic data like subject index"""
         try:
-            session = get_session()
-            load_subjects_from_db(session)
-            logger.info(f"✅ Loaded {len(SUBJECT_CANONICAL)} subjects for semantic matching")
+            get_session = get_cassandra_session()
+            load_subjects_from_db, SUBJECT_CANONICAL = get_subjects_utils()
+            
+            if get_session and load_subjects_from_db:
+                session = get_session()
+                load_subjects_from_db(session)
+                logger.info(f"✅ Loaded {len(SUBJECT_CANONICAL)} subjects for semantic matching")
             
             # Also load active statuses
             get_real_active_statuses()
@@ -295,6 +474,20 @@ class SemanticQueryProcessor:
         start_time = time.time()
         
         try:
+            # Get required functions
+            resolve_entities, canonicalize_plan_steps = get_entity_resolver()
+            execute_plan, create_error_response, create_security_error_response, format_response_message, PaginatedResponse = get_shared_functions()
+            
+            if not all([resolve_entities, canonicalize_plan_steps, execute_plan, create_error_response]):
+                return {
+                    "success": False,
+                    "message": "System initialization error - required modules not available",
+                    "data": [],
+                    "count": 0,
+                    "error": True,
+                    "execution_time": time.time() - start_time
+                }
+            
             # Step 1: Entity resolution (or use pre-resolved)
             if pre_resolved_entities:
                 entities = pre_resolved_entities
@@ -333,12 +526,39 @@ class SemanticQueryProcessor:
                 }
             
             # 👉 NEW: Try LLM FIRST (before patterns)
-            if self.llm:
+            if self.llm and self.enhanced_processor:
                 logger.info("🤖 Trying LLM first...")
                 analysis_result = await self.enhanced_processor.analyze_with_llm(query, user_id, user_role)
                 
                 if analysis_result:
                     logger.info("✅ LLM analysis successful")
+                    
+                    # FIX 1: Merge the resolver's filters back in
+                    analysis_result.setdefault("entities", {}).setdefault("filters", {}).update(
+                        entities.get("filters", {})
+                    )
+                    
+                    # POST-PROCESSOR SAFEGUARD: Clean up unwanted LLM additions
+                    for step in analysis_result.get("steps", []):
+                        # Strip status filter unless user actually asked for it
+                        if ("status" in step.get("where", {}) and 
+                            "active" not in query.lower() and 
+                            "current" not in query.lower() and 
+                            "enrolled" not in query.lower()):
+                            step["where"].pop("status")
+                            logger.debug("Removed unwanted status filter from LLM plan")
+                    
+                    # Collapse to a single step for simple COUNT queries
+                    if (len(analysis_result.get("steps", [])) > 1 and 
+                        analysis_result["steps"][0].get("select") == ["COUNT(*)"]):
+                        analysis_result["steps"] = [analysis_result["steps"][0]]
+                        logger.debug("Collapsed multi-step plan to single COUNT step")
+                    
+                    # VALIDATION LAYER: Remove unmentioned filters
+                    analysis_result = prune_unmentioned_filters(analysis_result, query)
+                    
+                    # DUPLICATE DETECTION: Remove duplicate steps
+                    analysis_result = remove_duplicate_steps(analysis_result)
                     
                     # --- CONVERT COUNT TO LIST IF NEEDED ---
                     if wants_list(query):
@@ -356,6 +576,16 @@ class SemanticQueryProcessor:
                     # One-shot cleanup using centralized canonicalizer
                     entities.update({"user_id": user_id, "user_role": user_role})
                     analysis_result = canonicalize_plan_steps(analysis_result, entities)
+                    
+                    # 🔧 ENHANCED POST-PROCESSING: Prune again after canonicalization
+                    analysis_result = prune_unmentioned_filters(analysis_result, query)
+                    analysis_result = remove_duplicate_steps(analysis_result)
+                    
+                    # 🔧 Remove empty or meaningless steps
+                    analysis_result["steps"] = [
+                        s for s in analysis_result["steps"] 
+                        if s.get("where") not in (None, {}, {"id": {"op": "=", "value": int(user_id) if user_id.isdigit() else user_id}})
+                    ]
                     
                     analysis_result["query"] = query
                     analysis_result["start_time"] = start_time
@@ -449,7 +679,14 @@ class SemanticQueryProcessor:
             
         except Exception as e:
             logger.error(f"Semantic processing error: {e}")
-            return create_error_response(query, str(e), start_time)
+            return {
+                "success": False,
+                "message": f"Processing error: {str(e)}",
+                "data": [],
+                "count": 0,
+                "error": True,
+                "execution_time": time.time() - start_time
+            }
     
     async def _try_semantic_patterns(
         self,
@@ -460,6 +697,13 @@ class SemanticQueryProcessor:
         start_time: float
     ) -> Optional[Dict[str, Any]]:
         """Try semantic pattern matching"""
+        
+        # Get required functions
+        resolve_entities, canonicalize_plan_steps = get_entity_resolver()
+        execute_plan, create_error_response, create_security_error_response, format_response_message, PaginatedResponse = get_shared_functions()
+        
+        if not all([execute_plan, create_error_response, create_security_error_response]):
+            return None
         
         match = self.semantic_router.match(query, entities)
         if not match:
@@ -521,10 +765,12 @@ class SemanticQueryProcessor:
             }
             
             # Use centralized canonicalizer
-            entities.update({"user_id": user_id, "user_role": user_role})
-            steps = canonicalize_plan_steps({"steps": steps}, entities)["steps"]
+            if canonicalize_plan_steps:
+                entities.update({"user_id": user_id, "user_role": user_role})
+                plan = canonicalize_plan_steps(plan, entities)
             
             logger.debug("FINAL SUBJECT GRADE PLAN >>> %s", json.dumps(plan, indent=2, default=str))
+            return await execute_plan(plan, user_id, user_role, self.llm)
             
         elif handler == "handle_list_student_subjects":
             # NEW: Handle listing subjects for a specific student
@@ -558,15 +804,17 @@ class SemanticQueryProcessor:
         elif handler == "handle_cohort_filter":
             step = {"table":"students","select":SELECT_STUDENTS,"where":{},"limit":100,"allow_filtering":True}
             plan = {"intent":"filter_by_cohort","entities":entities,"steps":[step],"query":query,"start_time":start_time}
-            entities.update({"user_id":user_id,"user_role":user_role})
-            plan = canonicalize_plan_steps(plan, entities)
+            if canonicalize_plan_steps:
+                entities.update({"user_id":user_id,"user_role":user_role})
+                plan = canonicalize_plan_steps(plan, entities)
             return await execute_plan(plan, user_id, user_role, self.llm)
             
         elif handler == "handle_subject_search":
             step = {"table":"subjects","select":SELECT_SUBJECTS,"where":{},"limit":100,"allow_filtering":True}
             plan = {"intent":"search_subjects","entities":entities,"steps":[step],"query":query,"start_time":start_time}
-            entities.update({"user_id":user_id,"user_role":user_role})
-            plan = canonicalize_plan_steps(plan, entities)
+            if canonicalize_plan_steps:
+                entities.update({"user_id":user_id,"user_role":user_role})
+                plan = canonicalize_plan_steps(plan, entities)
             return await execute_plan(plan, user_id, user_role, self.llm)
             
         elif handler == "handle_cgpa_filter":
@@ -594,8 +842,9 @@ class SemanticQueryProcessor:
                 "start_time": start_time
             }
             
-            ctx_entities = {**entities, "user_id": user_id, "user_role": user_role}
-            plan = canonicalize_plan_steps(plan, ctx_entities)
+            if canonicalize_plan_steps:
+                ctx_entities = {**entities, "user_id": user_id, "user_role": user_role}
+                plan = canonicalize_plan_steps(plan, ctx_entities)
             logger.debug("FINAL CGPA FILTER PLAN >>> %s", json.dumps(plan, indent=2, default=str))
             return await execute_plan(plan, user_id, user_role, self.llm)
             
@@ -625,8 +874,9 @@ class SemanticQueryProcessor:
             }
             
             # Apply entity filters using centralized canonicalizer
-            entities.update({"user_id": user_id, "user_role": user_role})
-            step = canonicalize_plan_steps({"steps":[step]}, entities)["steps"][0]
+            if canonicalize_plan_steps:
+                entities.update({"user_id": user_id, "user_role": user_role})
+                step = canonicalize_plan_steps({"steps":[step]}, entities)["steps"][0]
             
             steps = [step]
             
@@ -674,8 +924,9 @@ class SemanticQueryProcessor:
                 }
                 
                 # Re-apply entity filters using centralized canonicalizer
-                entities.update({"user_id": user_id, "user_role": user_role})
-                fallback_step = canonicalize_plan_steps({"steps":[fallback_step]}, entities)["steps"][0]
+                if canonicalize_plan_steps:
+                    entities.update({"user_id": user_id, "user_role": user_role})
+                    fallback_step = canonicalize_plan_steps({"steps":[fallback_step]}, entities)["steps"][0]
                 
                 fallback_plan = {
                     "intent": intent,
@@ -732,8 +983,9 @@ class SemanticQueryProcessor:
             }
             
             # Use centralized canonicalizer
-            entities.update({"user_id": user_id, "user_role": user_role})
-            plan = canonicalize_plan_steps(plan, entities)
+            if canonicalize_plan_steps:
+                entities.update({"user_id": user_id, "user_role": user_role})
+                plan = canonicalize_plan_steps(plan, entities)
             
             logger.info(f"📋 Built list plan with filters: {plan}")
             logger.debug("FINAL LIST PLAN >>> %s", json.dumps(plan, indent=2, default=str))
@@ -775,6 +1027,69 @@ class SemanticQueryProcessor:
         user_role: str
     ) -> Optional[Dict[str, Any]]:
         """Semantic-aware fallback when LLM and patterns fail"""
+        
+        # Get required functions
+        resolve_entities, canonicalize_plan_steps = get_entity_resolver()
+        
+        # 🔧 SPECIAL CASE: "my grades" → list all subjects for user
+        if re.search(r"\bmy\s+grades\b", query, re.I):
+            uid = _safe_int(user_id)
+            step_where = {}
+            if uid is not None:
+                step_where["id"] = {"op": "=", "value": uid}
+                
+            return {
+                "intent": "list_student_subjects",
+                "entities": {"id": uid} if uid is not None else {},
+                "steps": [{
+                    "table": "subjects",
+                    "select": ["id","subjectname","grade","overallpercentage","examyear","exammonth"],
+                    "where": step_where,
+                    "limit": 200,
+                    "allow_filtering": True
+                }]
+            }
+        
+        # 🔧 SPECIAL CASE: "my subjects" or "subjects that I take"
+        if (re.search(r"\bmy\s+subjects\b", query, re.I) or 
+            re.search(r"\b(?:list|show)\s+subjects\s+(?:that\s+)?I\s+(?:take|am taking|am enrolled in|have)\b", query, re.I)):
+            uid = _safe_int(user_id)
+            step_where = {}
+            if uid is not None:
+                step_where["id"] = {"op": "=", "value": uid}
+                
+            return {
+                "intent": "list_student_subjects",
+                "entities": {"id": uid} if uid is not None else {},
+                "steps": [{
+                    "table": "subjects",
+                    "select": ["id","subjectname","grade","overallpercentage","examyear","exammonth"],
+                    "where": step_where,
+                    "limit": 200,
+                    "allow_filtering": True
+                }]
+            }
+        
+        # 🔧 SPECIAL CASE: "my grade for X" → specific subject grade
+        m = re.search(r"\bmy\s+grades?\s+for\s+(.+)", query, re.I)
+        if m:
+            subj = m.group(1).strip()
+            uid = _safe_int(user_id)
+            step_where = {"subjectname": {"op": "=", "value": subj}}
+            if uid is not None:
+                step_where["id"] = {"op": "=", "value": uid}
+                
+            return {
+                "intent": "get_subject_grade",
+                "entities": {"subjectname": subj},
+                "steps": [{
+                    "table": "subjects",
+                    "select": ["id","subjectname","grade","overallpercentage"],
+                    "where": step_where,
+                    "limit": 10,
+                    "allow_filtering": True
+                }]
+            }
         
         # Handle clarification scenarios first
         if entities.get("force_programme"):
@@ -836,14 +1151,26 @@ class SemanticQueryProcessor:
             }]
             
             # Use centralized canonicalizer
-            entities.update({"user_id": user_id, "user_role": user_role})
-            plan = {
-                "intent": "count_query" if is_count_query else "list_students",
-                "entities": entities,
-                "steps": steps
-            }
-            plan = canonicalize_plan_steps(plan, entities)
-            return plan
+            if canonicalize_plan_steps:
+                entities.update({"user_id": user_id, "user_role": user_role})
+                plan = {
+                    "intent": "count_query" if is_count_query else "list_students",
+                    "entities": entities,
+                    "steps": steps
+                }
+                plan = canonicalize_plan_steps(plan, entities)
+                
+                # 🔧 ENHANCED POST-PROCESSING: Apply same fixes as LLM branch
+                plan = prune_unmentioned_filters(plan, query)
+                plan = remove_duplicate_steps(plan)
+                
+                # 🔧 Remove empty or meaningless steps
+                plan["steps"] = [
+                    s for s in plan["steps"] 
+                    if s.get("where") not in (None, {}, {"id": {"op": "=", "value": int(user_id) if user_id.isdigit() else user_id}})
+                ]
+                
+                return plan
         
         return None
 
@@ -872,37 +1199,63 @@ async def process_query(
 ) -> Dict[str, Any]:
     """Main entry point for semantic query processing"""
     
-    processor = get_semantic_processor()
-    
-    # Handle clarification by pre-resolving entities
-    pre_resolved_entities = None
-    if clarification:
-        logger.info(f"🎯 Processing clarification: {clarification}")
-        # Run entity resolver once to have a base dict
-        entities = resolve_entities(query)
+    try:
+        processor = get_semantic_processor()
         
-        if clarification["column"] == "programme":
-            entities.setdefault("filters", {})["programme"] = clarification["value"]
-            entities["force_programme"] = True
-        else:  # subjectname
-            entities["subjectname"] = clarification["value"]
-            entities["force_subject"] = True
+        # Get required functions
+        resolve_entities, canonicalize_plan_steps = get_entity_resolver()
+        execute_plan, create_error_response, create_security_error_response, format_response_message, PaginatedResponse = get_shared_functions()
         
-        # Remove disambiguation flags
-        entities.pop("needs_disambiguation", None)
-        entities.pop("ambiguous_terms", None)
+        if not resolve_entities:
+            return {
+                "success": False,
+                "message": "System initialization error - entity resolver not available",
+                "data": [],
+                "count": 0,
+                "error": True,
+                "execution_time": 0
+            }
         
-        pre_resolved_entities = entities
-        logger.info(f"🔧 Pre-resolved entities after clarification: {pre_resolved_entities}")
-    
-    # Process query with LLM-first approach
-    result = await processor.process_with_semantics(query, user_id, user_role, pre_resolved_entities)
-    
-    # Apply pagination if requested
-    if page > 1 or page_size != 100:
-        data = result.get("data", [])
-        paginated = PaginatedResponse.paginate(data, page, page_size)
-        result["data"] = paginated["data"]
-        result["pagination"] = paginated["pagination"]
-    
-    return result
+        # Handle clarification by pre-resolving entities
+        pre_resolved_entities = None
+        if clarification:
+            logger.info(f"🎯 Processing clarification: {clarification}")
+            # Run entity resolver once to have a base dict
+            entities = resolve_entities(query)
+            
+            if clarification["column"] == "programme":
+                entities.setdefault("filters", {})["programme"] = clarification["value"]
+                entities["force_programme"] = True
+            else:  # subjectname
+                entities["subjectname"] = clarification["value"]
+                entities["force_subject"] = True
+            
+            # Remove disambiguation flags
+            entities.pop("needs_disambiguation", None)
+            entities.pop("ambiguous_terms", None)
+            
+            pre_resolved_entities = entities
+            logger.info(f"🔧 Pre-resolved entities after clarification: {pre_resolved_entities}")
+        
+        # Process query with LLM-first approach
+        result = await processor.process_with_semantics(query, user_id, user_role, pre_resolved_entities)
+        
+        # Apply pagination if requested and PaginatedResponse is available
+        if PaginatedResponse and (page > 1 or page_size != 100):
+            data = result.get("data", [])
+            paginated = PaginatedResponse.paginate(data, page, page_size)
+            result["data"] = paginated["data"]
+            result["pagination"] = paginated["pagination"]
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in process_query: {e}")
+        return {
+            "success": False,
+            "message": f"Processing error: {str(e)}",
+            "data": [],
+            "count": 0,
+            "error": True,
+            "execution_time": 0
+        }

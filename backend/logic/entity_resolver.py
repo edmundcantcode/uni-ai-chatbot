@@ -144,6 +144,11 @@ def _best_fuzzy(term: str, choices: List[str]) -> Tuple[str, int]:
     """Return (choice_original, score). Score 0-100"""
     if not term:
         return "", 0
+    
+    # Tighten fuzzy matcher - ignore short n-grams that are too generic
+    if len(term.split()) < 3:  # ignore 1- or 2-word n-grams
+        return "", 0
+    
     match, score, _ = process.extractOne(term, choices, scorer=fuzz.token_sort_ratio)
     return match, score
 
@@ -158,8 +163,8 @@ def candidate_phrases(query: str) -> List[str]:
     """Extract candidate phrases from query, longest first."""
     qn = _norm(query)
     words = qn.split()
-    # longest first helps early confident matches
-    cands = sorted(_ngrams(words, 1, 5), key=lambda x: -len(x))
+    # longest first helps early confident matches - reduced from 5 to 4
+    cands = sorted(_ngrams(words, 1, 4), key=lambda x: -len(x))
     # dedupe maintaining order
     seen, uniq = set(), []
     
@@ -183,7 +188,7 @@ def candidate_phrases(query: str) -> List[str]:
     return uniq
 
 # ---------- Classification (from first file) ----------
-THRESH = 80                 # Increased threshold for more precision
+THRESH = 85                 # Increased threshold for more precision (was 80)
 GAP = 8                     # Increased gap to reduce ambiguity
 
 def classify_term(term: str) -> Dict[str, str]:
@@ -402,52 +407,63 @@ def resolve_entities(user_query: str) -> Dict[str, Any]:
     
     q_lower = user_query.lower()
     
+    # ---------------------------------------------------------
+    # 0️⃣ Guard: cohort-style queries never talk about subjects
+    if "cohort" in q_lower and not any(k in q_lower for k in GRADE_KEYWORDS):
+        skip_subject_lookup = True
+    else:
+        skip_subject_lookup = False
+    # ---------------------------------------------------------
+    
     # Determine table hint
     entities["table_hint"] = _determine_table_hint(q_lower)
     
     # Track ambiguous choices for clarification
     ambiguous_choices = []
     
-    # NEW: Fuzzy classification of academic phrases (from first file)
-    for phrase in candidate_phrases(user_query):
-        classified = classify_term(phrase)
-        if not classified:
-            continue
-            
-        if classified.get("ambiguous"):
-            # Store ambiguous choice for user clarification
-            ambiguous_choices.append({
-                "phrase": phrase,
-                "programme": classified["best_programme"],
-                "subjectname": classified["best_subject"],
-                "scores": classified["scores"]
-            })
-            continue
-            
-        if "programme" in classified and "programme" not in entities["filters"]:
-            entities["filters"]["programme"] = classified["programme"]
-            entities["operators"]["programme"] = "="
-            entities["table_hint"] = entities["table_hint"] or "students"
-            logger.info(f"Fuzzy matched programme: '{phrase}' -> '{classified['programme']}'")
-        elif "subjectname" in classified and not entities.get("subjectname"):
-            entities["subjectname"] = classified["subjectname"]
-            entities["table_hint"] = entities["table_hint"] or "subjects"
-            logger.info(f"Fuzzy matched subject: '{phrase}' -> '{classified['subjectname']}'")
+    # NEW: Fuzzy classification of academic phrases (from first file) - SKIP IF COHORT QUERY
+    if not skip_subject_lookup:
+        for phrase in candidate_phrases(user_query):
+            classified = classify_term(phrase)
+            if not classified:
+                continue
+                
+            if classified.get("ambiguous"):
+                # Store ambiguous choice for user clarification
+                ambiguous_choices.append({
+                    "phrase": phrase,
+                    "programme": classified["best_programme"],
+                    "subjectname": classified["best_subject"],
+                    "scores": classified["scores"]
+                })
+                continue
+                
+            if "programme" in classified and "programme" not in entities["filters"]:
+                entities["filters"]["programme"] = classified["programme"]
+                entities["operators"]["programme"] = "="
+                entities["table_hint"] = entities["table_hint"] or "students"
+                logger.info(f"Fuzzy matched programme: '{phrase}' -> '{classified['programme']}'")
+            elif "subjectname" in classified and not entities.get("subjectname"):
+                entities["subjectname"] = classified["subjectname"]
+                entities["table_hint"] = entities["table_hint"] or "subjects"
+                logger.info(f"Fuzzy matched subject: '{phrase}' -> '{classified['subjectname']}'")
     
     # Handle ambiguous terms
     if ambiguous_choices:
         entities["ambiguous_terms"] = ambiguous_choices
         entities["needs_disambiguation"] = True
         logger.info(f"Found {len(ambiguous_choices)} ambiguous terms requiring clarification")
-    if not entities.get("subjectname"):
+    
+    # Pattern-based subject extraction - SKIP IF COHORT QUERY
+    if not skip_subject_lookup and not entities.get("subjectname"):
         subject = _extract_subject_name(user_query, q_lower)
         if subject:
             entities["subjectname"] = subject
             entities["table_hint"] = entities["table_hint"] or "subjects"
             logger.info(f"Pattern matched subject: '{subject}'")
     
-    # 4. Actually use your fuzzy subject index when no exact match
-    if not entities.get("subjectname"):
+    # 4. Actually use your fuzzy subject index when no exact match - SKIP IF COHORT QUERY
+    if not skip_subject_lookup and not entities.get("subjectname"):
         # try contains list
         cand = find_subjects_containing(user_query)  # returns list
         if len(cand) == 1:
@@ -547,14 +563,15 @@ def _extract_subject_name(query: str, q_lower: str) -> Optional[str]:
             if canonical:
                 return canonical
     
-    # Try to find subject by looking for capitalized phrases
-    cap_pattern = r"[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*"
-    cap_matches = re.findall(cap_pattern, query)
-    for phrase in cap_matches:
-        if len(phrase) > 3:  # Skip short matches
-            canonical = best_subject_match(phrase)
-            if canonical:
-                return canonical
+    # Try to find subject by looking for capitalized phrases - ONLY if query has grade/subject cues
+    if any(k in q_lower for k in GRADE_KEYWORDS | {"subject", "subjectname"}):
+        cap_pattern = r"[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*"
+        cap_matches = re.findall(cap_pattern, query)
+        for phrase in cap_matches:
+            if len(phrase) > 3:  # Skip short matches
+                canonical = best_subject_match(phrase)
+                if canonical:
+                    return canonical
     
     return None
 
@@ -609,39 +626,47 @@ def _extract_filters(q_lower: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
     
     return filters, operators
 
+# Regex for "[month] [year]" in one shot
+MONTH_YEAR_RE = re.compile(
+    r"\b(" +
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|" +
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?" +
+    r")\s+(20\d{2})\b",
+    re.I,
+)
+
 def _extract_cohort(q_lower: str) -> Dict[str, Any]:
     """Extract cohort information (month/year) for YYYYMM format."""
     cohort_info = {}
     
-    # Extract year (prioritize 4-digit years)
-    year_match = re.search(r"\b(20\d{2})\b", q_lower)
-    if year_match:
-        cohort_info["year"] = int(year_match.group(1))
-    
-    # Extract months
-    found_months = []
-    
-    # Full month names
-    for month in MONTHS:
-        if month in q_lower:
-            found_months.append(month.lower())
-    
-    # Abbreviated month names
-    for abbrev in MONTH_NUM.keys():
-        if abbrev in q_lower.split():
-            found_months.append(abbrev)
-    
-    # Check for direct YYYYMM format
-    yyyymm_match = re.search(r"\b(20\d{4})\b", q_lower)
-    if yyyymm_match:
-        cohort_info["cohort"] = yyyymm_match.group(1)
+    # 1️⃣ Direct YYYYMM already there ------------------------------------
+    direct = re.search(r"\b(20\d{4})\b", q_lower)
+    if direct:
+        cohort_info["cohort"] = direct.group(1)
         return cohort_info
     
-    # Store month for later normalization
-    if found_months:
-        # Take the first month found
-        cohort_info["cohort"] = found_months[0]
+    # 2️⃣ "[Month] YYYY" → YYYYMM --------------------------------------
+    m = MONTH_YEAR_RE.search(q_lower)
+    if m:
+        month, year = m.group(1), m.group(2)
+        code = normalize_cohort(month, year)
+        if code:
+            cohort_info["cohort"] = code
+            return cohort_info
     
+    # 3️⃣ Legacy logic (still allows "cohort March" + separate year) -------
+    found_months = []
+    for month in MONTH_NUM:
+        if month in q_lower.split():  # abbrev
+            found_months.append(month)
+    for month in MONTHS:  # full names
+        if month in q_lower:
+            found_months.append(month)
+    
+    if found_months:
+        cohort_info["cohort"] = found_months[0]  # e.g. "march"
+    
+    # NOTE: we no longer return "year" — downstream logic should ignore it
     return cohort_info
 
 def _extract_country(q_lower: str) -> Optional[str]:
@@ -724,14 +749,14 @@ def enhance_step_with_entities(step: Dict[str, Any], entities: Dict[str, Any]) -
             logger.debug(f"Entity subject canonicalized '{entities['subjectname']}' -> '{canon_subj}'")
     
     # Special handling for cohort: combine month and year into YYYYMM format
-    if "cohort" in filters or "year" in filters:
+    if "cohort" in filters:
         cohort_code = None
         
         # Case A: user already gave 6 digits (YYYYMM)
-        if "cohort" in filters and str(filters["cohort"]).isdigit() and len(str(filters["cohort"])) == 6:
+        if str(filters["cohort"]).isdigit() and len(str(filters["cohort"])) == 6:
             cohort_code = str(filters["cohort"])
         else:
-            # Case B: normalize from month + year
+            # Case B: normalize from month + year (if year exists)
             cohort_code = normalize_cohort(filters.get("cohort"), filters.get("year"))
         
         if cohort_code:
@@ -739,6 +764,11 @@ def enhance_step_with_entities(step: Dict[str, Any], entities: Dict[str, Any]) -
             logger.debug(f"Cohort normalized to '{cohort_code}'")
             # Remove raw pieces so they don't get added again
             filters = {k: v for k, v in filters.items() if k not in ["cohort", "year"]}
+    
+    # Clean up any remaining year filter (no longer needed)
+    if "year" in filters:
+        logger.debug("Removing standalone year filter (redundant with cohort)")
+        filters = {k: v for k, v in filters.items() if k != "year"}
     
     # Apply remaining filters
     for field, value in filters.items():
@@ -829,6 +859,26 @@ def fix_subject_names_in_step(step: Dict[str, Any]) -> Dict[str, Any]:
     return step
 
 # ---------- Plan Canonicalization Helper ----------
+# Status normalization constants
+ACTIVE_WORDS_SET = {"active", "currently active", "enrolled", "current", "currently enrolled"}
+
+def _canon_status(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """If op is '=' and value is any lowercase/variant of 'active', convert to IN ['Active','Enrolled','Current']."""
+    if isinstance(spec, dict):
+        if spec.get("op","").upper() == "=":
+            val = str(spec.get("value","")).strip().lower()
+            if val in ACTIVE_WORDS_SET:
+                spec["op"] = "IN"
+                spec["value"] = ["Active", "Enrolled", "Current"]
+    return spec
+
+def _harmonise_in_key(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Accept either value or values for IN operations. Converts values → value in-place."""
+    if isinstance(spec, dict) and spec.get("op", "").upper() == "IN":
+        if "values" in spec and "value" not in spec:
+            spec["value"] = spec.pop("values")
+    return spec
+
 def canonicalize_plan_steps(plan: Dict[str, Any], entities: Dict[str, Any]) -> Dict[str, Any]:
     """
     Always run canonicalization on all steps in a plan before execution.
@@ -842,11 +892,30 @@ def canonicalize_plan_steps(plan: Dict[str, Any], entities: Dict[str, Any]) -> D
     
     # Apply full cleanup pipeline to all steps
     for i, step in enumerate(plan["steps"]):
+        # PATCH: Normalize IN specs before processing
+        for col, spec in step.get("where", {}).items():
+            if isinstance(spec, dict):
+                if spec.get("op", "").upper() == "IN":
+                    # allow either value or values
+                    if "values" in spec and "value" not in spec:
+                        spec["value"] = spec.pop("values")
+        
+        # PATCH: Fix wildcard selects that LLM might produce
+        if step.get("select") == ["*"]:
+            step["select"] = SELECT_STUDENTS if step.get("table") == "students" else SELECT_SUBJECTS
+            logger.debug(f"Fixed wildcard select for table {step.get('table')}")
+        
         # Full cleanup pipeline
         plan["steps"][i] = enhance_step_with_entities(step, entities)
         plan["steps"][i] = fix_subject_names_in_step(plan["steps"][i])
         plan["steps"][i] = prune_where_for_table(plan["steps"][i])
         plan["steps"][i] = normalize_ops(plan["steps"][i])
+        
+        # HARMONIZE IN KEYS: Apply to all where conditions after processing
+        for col, cond in plan["steps"][i].get("where", {}).items():
+            _harmonise_in_key(cond)
+            if col == "status":
+                _canon_status(cond)
         
         logger.debug("Step %d after canonicalization: %s", i, plan["steps"][i])
     
