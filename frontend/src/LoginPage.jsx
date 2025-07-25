@@ -287,7 +287,7 @@ const LoginPage = ({ onLogin }) => {
               <div style={styles.innerDot}></div>
             </div>
           </div>
-          <h1 style={styles.title}>University AI</h1>
+          <h1 style={styles.title}>EduAi</h1>
           <p style={styles.subtitle}>Welcome back! Please sign in to continue</p>
         </div>
 

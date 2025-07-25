@@ -8,9 +8,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# SHARED EXECUTION LOGIC
-# ============================================================================
 
 async def execute_plan(
     plan: Dict[str, Any],

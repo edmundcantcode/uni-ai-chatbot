@@ -1,4 +1,3 @@
-# backend/logic/step_runner.py
 from typing import List, Dict, Any, Iterable, Tuple, Optional, Union
 from cassandra.query import SimpleStatement
 import logging
@@ -204,8 +203,7 @@ def execute_query_once(session, table: str, select_cols: List[str],
             result = session.execute(prepared, params)
         else:
             result = session.execute(SimpleStatement(cql))
-        
-        # 🔧 CRITICAL FIX: Convert to list immediately and store in separate variable
+    
         raw_rows = list(result)
         
         if hasattr(result, 'warnings') and result.warnings:
@@ -225,7 +223,6 @@ def execute_query_once(session, table: str, select_cols: List[str],
         logger.error(f"Query execution failed: {e}")
         raise
     
-    # 🔧 CRITICAL FIX: Convert to list of dicts using raw_rows (NOT result)
     rows = []
     for r in raw_rows:
         row_dict = {}
@@ -239,7 +236,6 @@ def execute_query_once(session, table: str, select_cols: List[str],
                 row_dict[col] = str(val)
         rows.append(row_dict)
     
-    # 🔧 SPECIAL HANDLING: Detect COUNT queries and extract count value
     is_count_query = any("COUNT(" in str(col).upper() for col in select_cols)
     count_value = None
     

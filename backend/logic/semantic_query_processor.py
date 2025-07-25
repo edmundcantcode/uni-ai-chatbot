@@ -2,6 +2,8 @@
 """
 Enhanced query processor with LLM-first approach and semantic fallbacks.
 FIXED: Row iteration bug and status value normalization
+ADDED: Pass/Fail student patterns
+ADDED: CQL fallback system for when semantic processing fails
 """
 
 import asyncio
@@ -22,98 +24,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-def prune_unmentioned_filters(plan: Dict[str, Any], user_query: str) -> Dict[str, Any]:
-    """Remove filters for columns the user never mentioned - ENHANCED to handle nested filters"""
-    q_lower = user_query.lower()
-    
-    # Build allowed columns based on what's mentioned in query
-    allowed = set()
-    
-    # Always allow basic filters
-    allowed.update(["id", "allow_filtering"])
-    
-    # Check for mentions of specific columns
-    if any(word in q_lower for word in ["cohort", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
-        allowed.add("cohort")
-    if any(word in q_lower for word in ["active", "enrolled", "current", "status"]):
-        allowed.add("status")
-    if any(word in q_lower for word in ["graduated", "graduation"]):
-        allowed.add("graduated")
-    if any(word in q_lower for word in ["programme", "program", "computer science", "information technology", "cs", "it"]):
-        allowed.add("programme")
-    if any(word in q_lower for word in ["cgpa", "gpa"]):
-        allowed.add("overallcgpa")
-    if any(word in q_lower for word in ["gender", "male", "female", "men", "women"]):
-        allowed.add("gender")
-    if any(word in q_lower for word in ["country", "malaysia", "singapore", "india"]):
-        allowed.add("country")
-    if any(word in q_lower for word in ["subject", "grade", "score", "marks"]):
-        allowed.add("subjectname")
-    if any(word in q_lower for word in ["year", "2020", "2021", "2022", "2023", "2024"]):
-        allowed.update(["examyear", "year"])
-    
-    def strip_where(where: Dict[str, Any]):
-        """Helper to strip unwanted filters from where clauses"""
-        for col in list(where.keys()):
-            if col not in allowed:
-                logger.debug(f"Removing unmentioned filter: {col}")
-                where.pop(col, None)
-    
-    # Prune unmentioned filters from all steps
-    for step in plan.get("steps", []):
-        # Main where clause
-        strip_where(step.get("where", {}))
-        
-        # If the LLM put a nested where under post_aggregation
-        if "post_aggregation" in step and isinstance(step["post_aggregation"], dict):
-            strip_where(step["post_aggregation"].get("where", {}))
-    
-    return plan
-
-def remove_duplicate_steps(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove duplicate steps from plan"""
-    if "steps" not in plan:
-        return plan
-    
-    unique = []
-    for s in plan["steps"]:
-        if s not in unique:  # naive but works
-            unique.append(s)
-        else:
-            logger.debug("Removed duplicate step")
-    
-    plan["steps"] = unique
-    return plan
-
-# backend/logic/semantic_query_processor.py
-"""
-Enhanced query processor with LLM-first approach and semantic fallbacks.
-FIXED: Row iteration bug and status value normalization
-"""
-
-# backend/logic/semantic_query_processor.py
-"""
-Enhanced query processor with LLM-first approach and semantic fallbacks.
-FIXED: Row iteration bug and status value normalization
-"""
-
-import asyncio
-import time
-import json
-import re
-import sys
-from typing import Dict, Any, List, Optional, Tuple
-
-# CRITICAL: Setup logging first before any other imports
-import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s:%(lineno)d - %(message)s",
-    stream=sys.stdout,
-    force=True
-)
-
-logger = logging.getLogger(__name__)
+# Import the fallback system
+from backend.constants.fallback_queries import should_try_fallback, try_fallback_query
 
 # FIXED: Move imports inside functions to avoid circular imports
 def get_llama_llm():
@@ -137,8 +49,8 @@ def get_cassandra_session():
 def get_subjects_utils():
     """Lazy import of subjects utilities"""
     try:
-        from backend.constants.subjects_index import load_subjects_from_db, SUBJECT_CANONICAL
-        return load_subjects_from_db, SUBJECT_CANONICAL
+        from backend.constants.subjects_index import load_subjects_from_file, SUBJECT_CANONICAL
+        return load_subjects_from_file, SUBJECT_CANONICAL
     except ImportError as e:
         logger.error(f"Failed to import subjects utils: {e}")
         return None, {}
@@ -226,6 +138,70 @@ def get_shared_functions():
             logger.error(f"Failed to import shared functions: {e}")
             return None, None, None, None, None
 
+def prune_unmentioned_filters(plan: Dict[str, Any], user_query: str) -> Dict[str, Any]:
+    """Remove filters for columns the user never mentioned - ENHANCED to handle nested filters"""
+    q_lower = user_query.lower()
+    
+    # Build allowed columns based on what's mentioned in query
+    allowed = set()
+    
+    # Always allow basic filters
+    allowed.update(["id", "allow_filtering"])
+    
+    # Check for mentions of specific columns
+    if any(word in q_lower for word in ["cohort", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
+        allowed.add("cohort")
+    if any(word in q_lower for word in ["active", "enrolled", "current", "status"]):
+        allowed.add("status")
+    if any(word in q_lower for word in ["graduated", "graduation"]):
+        allowed.add("graduated")
+    if any(word in q_lower for word in ["programme", "program", "computer science", "information technology", "cs", "it"]):
+        allowed.add("programme")
+    if any(word in q_lower for word in ["cgpa", "gpa"]):
+        allowed.add("overallcgpa")
+    if any(word in q_lower for word in ["gender", "male", "female", "men", "women"]):
+        allowed.add("gender")
+    if any(word in q_lower for word in ["country", "malaysia", "singapore", "india"]):
+        allowed.add("country")
+    if any(word in q_lower for word in ["subject", "grade", "score", "marks", "passed", "failed"]):
+        allowed.add("subjectname")
+        allowed.add("grade")  # Allow grade filter for pass/fail queries
+    if any(word in q_lower for word in ["year", "2020", "2021", "2022", "2023", "2024"]):
+        allowed.update(["examyear", "year"])
+    
+    def strip_where(where: Dict[str, Any]):
+        """Helper to strip unwanted filters from where clauses"""
+        for col in list(where.keys()):
+            if col not in allowed:
+                logger.debug(f"Removing unmentioned filter: {col}")
+                where.pop(col, None)
+    
+    # Prune unmentioned filters from all steps
+    for step in plan.get("steps", []):
+        # Main where clause
+        strip_where(step.get("where", {}))
+        
+        # If the LLM put a nested where under post_aggregation
+        if "post_aggregation" in step and isinstance(step["post_aggregation"], dict):
+            strip_where(step["post_aggregation"].get("where", {}))
+    
+    return plan
+
+def remove_duplicate_steps(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove duplicate steps from plan"""
+    if "steps" not in plan:
+        return plan
+    
+    unique = []
+    for s in plan["steps"]:
+        if s not in unique:  # naive but works
+            unique.append(s)
+        else:
+            logger.debug("Removed duplicate step")
+    
+    plan["steps"] = unique
+    return plan
+
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -312,6 +288,18 @@ class SemanticRouter:
             "handle_list_student_subjects"
         ),
         
+        # NEW: Pass/Fail patterns - ENHANCED with broader matching
+        SemanticPattern(
+            r"(?:list|show)\s+(?:me\s+)?students\s+who\s+passed\s+(.+)",
+            "list_passed_students",
+            "handle_list_passed_students"
+        ),
+        SemanticPattern(
+            r"(?:list|show)\s+(?:me\s+)?students\s+who\s+failed\s+(.+)",
+            "list_failed_students", 
+            "handle_list_failed_students"
+        ),
+        
         # Subject grade queries
         SemanticPattern(
             r"(?:my |show |get )?(?:grade|score|marks?|result)s?\s+(?:for|in|of)\s+(.+)",
@@ -395,6 +383,18 @@ class SemanticRouter:
             "search_subjects",
             "handle_subject_search"
         ),
+        
+        # Student results by name
+        SemanticPattern(
+            r"(?:show|list|get|display).*(?:results?|grades?|subjects?)\s+(?:of|for)\s+(.+)",
+            "list_student_subjects_by_name",
+            "handle_list_student_subjects_by_name"
+        ),
+        SemanticPattern(
+            r"(.+?)(?:'s|s')\s+(?:results?|grades?|subjects?)",
+            "list_student_subjects_by_name", 
+            "handle_list_student_subjects_by_name"
+        ),
     ]
     
     def match(self, query: str, entities: Dict[str, Any]) -> Optional[Tuple[Any, Dict[str, str]]]:
@@ -448,15 +448,17 @@ class SemanticQueryProcessor:
     def _load_semantic_data(self):
         """Load semantic data like subject index"""
         try:
-            get_session = get_cassandra_session()
-            load_subjects_from_db, SUBJECT_CANONICAL = get_subjects_utils()
+            # Import the file-based loader instead of DB loader
+            from backend.constants.subjects_index import load_subjects_from_file, SUBJECT_CANONICAL
             
-            if get_session and load_subjects_from_db:
-                session = get_session()
-                load_subjects_from_db(session)
-                logger.info(f"✅ Loaded {len(SUBJECT_CANONICAL)} subjects for semantic matching")
+            # Load subjects from file instead of Cassandra
+            load_subjects_from_file()
             
-            # Also load active statuses
+            # Re-import SUBJECT_CANONICAL after loading to get updated list
+            from backend.constants.subjects_index import SUBJECT_CANONICAL
+            logger.info(f"✅ Loaded {len(SUBJECT_CANONICAL)} subjects for semantic matching")
+            
+            # Also load active statuses (this can stay as is since it's still using DB)
             get_real_active_statuses()
             
         except Exception as e:
@@ -496,7 +498,7 @@ class SemanticQueryProcessor:
                 entities = resolve_entities(query)
                 logger.info(f"🧠 Resolved entities: {entities}")
             
-            # 🔴 SHORT-CIRCUIT FOR DISAMBIGUATION (before LLM/patterns)
+            # SHORT-CIRCUIT FOR DISAMBIGUATION (before LLM/patterns)
             if entities.get("needs_disambiguation"):
                 opts = []
                 for amb in entities["ambiguous_terms"]:
@@ -525,7 +527,17 @@ class SemanticQueryProcessor:
                     "execution_time": time.time() - start_time
                 }
             
-            # 👉 NEW: Try LLM FIRST (before patterns)
+            # 👉 SHORT-CIRCUIT: Force pass/fail queries to use pattern handlers
+            if re.search(r"\bpassed\b|\bfailed\b", query, re.I):
+                logger.info("🎯 Pass/Fail query detected, skipping LLM and using pattern handler")
+                pattern_result = await self._try_semantic_patterns(query, entities, user_id, user_role, start_time)
+                if pattern_result:
+                    pattern_result["execution_time"] = time.time() - start_time
+                    pattern_result["semantic_entities"] = entities
+                    pattern_result["processor_used"] = "semantic_patterns_pass_fail"
+                    return pattern_result
+            
+            # 👉 Try LLM FIRST (before patterns) for non-pass/fail queries
             if self.llm and self.enhanced_processor:
                 logger.info("🤖 Trying LLM first...")
                 analysis_result = await self.enhanced_processor.analyze_with_llm(query, user_id, user_role)
@@ -773,7 +785,7 @@ class SemanticQueryProcessor:
             return await execute_plan(plan, user_id, user_role, self.llm)
             
         elif handler == "handle_list_student_subjects":
-            # NEW: Handle listing subjects for a specific student
+            # Handle listing subjects for a specific student
             uid = _safe_int(captures.get("group_1", user_id))  # Use captured student ID or default to current user
             
             step = {
@@ -798,6 +810,144 @@ class SemanticQueryProcessor:
             
             logger.info("📋 Built student subjects plan: %s", plan)
             logger.debug("FINAL STUDENT SUBJECTS PLAN >>> %s", json.dumps(plan, indent=2, default=str))
+            
+            return await execute_plan(plan, user_id, user_role, self.llm)
+            
+        elif handler == "handle_list_passed_students":
+            # Import subjects index for fuzzy matching
+            try:
+                from backend.constants.subjects_index import best_subject_match, SUBJECT_LOOKUP
+            except ImportError:
+                logger.error("Failed to import subjects index for fuzzy matching")
+                return create_error_response(
+                    query,
+                    "Subject matching system not available.",
+                    start_time
+                )
+            
+            # 1) Get raw capture from user input
+            raw = captures.get("group_1", "").strip()
+            
+            if not raw:
+                return create_error_response(
+                    query,
+                    "Could not identify the subject name.",
+                    start_time
+                )
+            
+            # 2) Use fuzzy matching to find the canonical form
+            canon = best_subject_match(raw, threshold=80)
+            
+            if not canon:
+                return create_error_response(
+                    query,
+                    f"Could not recognize the subject \"{raw}\". Please check the spelling or try a different name.",
+                    start_time
+                )
+            
+            # 3) Get the exact DB value (which is the same as canonical - camelCase without spaces)
+            db_name = SUBJECT_LOOKUP[canon]["subjectname"]  # This is "ArtificialIntelligence", not "Artificial Intelligence"
+            
+            logger.info(f"🔍 Fuzzy matched \"{raw}\" → canonical \"{canon}\" → DB value \"{db_name}\"")
+            
+            # 4) Build your two-step plan using the exact database subjectname
+            step0 = {
+                "table": "subjects",
+                "select": ["id"],
+                "where": {
+                    "subjectname": {"op": "=", "value": db_name},  # Use camelCase DB value
+                    "grade": {"op": "!=", "value": "F"}
+                },
+                "allow_filtering": True
+            }
+            
+            # Step 1: fetch full student records for those IDs
+            step1 = {
+                "table": "students",
+                "select": ["id", "name", "programme", "overallcgpa", "cohort", "status", "graduated"],
+                "where_in_ids_from_step": 0,
+                "allow_filtering": True
+            }
+            
+            plan = {
+                "intent": "list_passed_students",
+                "entities": {"subjectname": db_name, "canonical": canon, "user_input": raw},
+                "steps": [step0, step1],
+                "query": query,
+                "start_time": start_time
+            }
+            
+            logger.info(f"📋 Built passed students plan for DB subject: {db_name}")
+            logger.debug("FINAL PASSED STUDENTS PLAN >>> %s", json.dumps(plan, indent=2, default=str))
+            
+            return await execute_plan(plan, user_id, user_role, self.llm)
+
+        elif handler == "handle_list_failed_students":
+            # Import subjects index for fuzzy matching
+            try:
+                from backend.constants.subjects_index import best_subject_match, SUBJECT_LOOKUP
+            except ImportError:
+                logger.error("Failed to import subjects index for fuzzy matching")
+                return create_error_response(
+                    query,
+                    "Subject matching system not available.",
+                    start_time
+                )
+            
+            # 1) Get raw capture from user input
+            raw = captures.get("group_1", "").strip()
+            
+            if not raw:
+                return create_error_response(
+                    query,
+                    "Could not identify the subject name.",
+                    start_time
+                )
+            
+            # 2) Use fuzzy matching to find the canonical form
+            canon = best_subject_match(raw, threshold=80)
+            
+            if not canon:
+                return create_error_response(
+                    query,
+                    f"Could not recognize the subject \"{raw}\". Please check the spelling or try a different name.",
+                    start_time
+                )
+            
+            # 3) Get the exact DB value (which is the same as canonical - camelCase without spaces)
+            db_name = SUBJECT_LOOKUP[canon]["subjectname"]  # This is "ArtificialIntelligence", not "Artificial Intelligence"
+            
+            logger.info(f"🔍 Fuzzy matched \"{raw}\" → canonical \"{canon}\" → DB value \"{db_name}\"")
+            
+            # 4) Build your two-step plan using the exact database subjectname
+            step0 = {
+                "table": "subjects",
+                "select": ["id"],
+                "where": {
+                    "subjectname": {"op": "=", "value": db_name},  # Use camelCase DB value
+                    "grade": {"op": "=", "value": "F"}
+                },
+                "allow_filtering": True
+            }
+            
+            # Step 1: fetch full student records for those IDs
+            step1 = {
+                "table": "students",
+                "select": ["id", "name", "programme", "overallcgpa", "cohort", "status", "graduated"],
+                "where_in_ids_from_step": 0,
+                "allow_filtering": True
+            }
+            
+            plan = {
+                "intent": "list_failed_students",
+                "entities": {"subjectname": db_name, "canonical": canon, "user_input": raw},
+                "steps": [step0, step1],
+                "query": query,
+                "start_time": start_time
+            }
+            
+            logger.info(f"📋 Built failed students plan for DB subject: {db_name}")
+            logger.debug("FINAL FAILED STUDENTS PLAN >>> %s", json.dumps(plan, indent=2, default=str))
             
             return await execute_plan(plan, user_id, user_role, self.llm)
             
@@ -851,7 +1001,6 @@ class SemanticQueryProcessor:
         elif handler == "handle_count_students":
             where = {}
             
-            # 🔧 FIXED: Use real active status values from database
             if intent == "count_active_students":
                 real_active_statuses = get_real_active_statuses()
                 where = {"status": {"op": "IN", "value": real_active_statuses}}
@@ -864,8 +1013,7 @@ class SemanticQueryProcessor:
                 where["gender"] = {"op": "=", "value": "Male"}
             elif "all" in intent:
                 pass  # No filter for all students
-            
-            # 🔧 CRITICAL FIX: Apply entity filters to count queries too!
+             
             step = {
                 "table": "students",
                 "select": ["COUNT(*)"],
@@ -893,7 +1041,6 @@ class SemanticQueryProcessor:
             # Execute the plan
             result = await execute_plan(plan, user_id, user_role, self.llm)
             
-            # 🔧 INJECT COUNT MESSAGES: Add descriptive messages for count results
             if result.get("message") in (None, "") and result.get("count") is not None:
                 intent = result.get("intent", "")
                 if intent.startswith("count_"):
@@ -908,7 +1055,7 @@ class SemanticQueryProcessor:
                         noun = "currently enrolled students"
                     result["message"] = f"📊 **{result['count']:,}** {noun}"
             
-            # 🔧 IMPROVED FALLBACK: If count is 0 and we used status filter, try graduated=False
+            # IMPROVED FALLBACK: If count is 0 and we used status filter, try graduated=False
             if (intent == "count_active_students" and 
                 result.get("count") == 0 and 
                 "status" in plan["steps"][0]["where"]):
@@ -938,7 +1085,7 @@ class SemanticQueryProcessor:
                 
                 result = await execute_plan(fallback_plan, user_id, user_role, self.llm)
                 
-                # 🔧 INJECT COUNT MESSAGES: Add descriptive messages for fallback count results
+                # INJECT COUNT MESSAGES: Add descriptive messages for fallback count results
                 if result.get("message") in (None, "") and result.get("count") is not None:
                     intent = result.get("intent", "")
                     if intent.startswith("count_"):
@@ -995,7 +1142,7 @@ class SemanticQueryProcessor:
             
             # 🔧 FALLBACK: If result is empty with status filter, try graduated=False
             if ("active" in intent or "enrolled" in intent or "current" in intent) and len(result.get("data", [])) == 0:
-                logger.info("🔄 Empty result with status filter, retrying with graduated=False")
+                logger.info(" Empty result with status filter, retrying with graduated=False")
                 
                 # Retry with graduated filter
                 fallback_step = dict(step)
@@ -1015,6 +1162,64 @@ class SemanticQueryProcessor:
                 logger.debug("FALLBACK LIST RESULT -> %d rows", len(result.get("data", [])))
             
             return result
+            
+        elif handler == "handle_list_student_subjects_by_name":
+            # Handle looking up student subjects by student name
+            name = captures.get("group_1", "").strip()
+            
+            if not name:
+                return create_error_response(
+                    query,
+                    "Could not identify the student name.",
+                    start_time
+                )
+            
+            # Clean up the name - remove common words that might be captured
+            name_words = name.split()
+            # Remove common trailing words that might get captured
+            exclude_words = ['grades', 'results', 'subjects', 'transcript', 'performance']
+            cleaned_name_words = [word for word in name_words if word.lower() not in exclude_words]
+            cleaned_name = ' '.join(cleaned_name_words).strip()
+            
+            if not cleaned_name:
+                return create_error_response(
+                    query,
+                    "Could not identify a valid student name.",
+                    start_time
+                )
+            
+            logger.info(f"Looking up student subjects for: '{cleaned_name}'")
+            
+            # Step 0: Look up student ID by name
+            step0 = {
+                "table": "students", 
+                "select": ["id", "name"],
+                "where": {
+                    "name": {"op": "=", "value": cleaned_name}
+                },
+                "allow_filtering": True
+            }
+            
+            # Step 1: Fetch their subjects using the ID from step 0
+            step1 = {
+                "table": "subjects",
+                "select": ["id", "subjectname", "grade", "overallpercentage", "examyear", "exammonth"],
+                "where_in_ids_from_step": 0,
+                "allow_filtering": True
+            }
+            
+            plan = {
+                "intent": "list_student_subjects_by_name",
+                "entities": {"student_name": cleaned_name},
+                "steps": [step0, step1],
+                "query": query,
+                "start_time": start_time
+            }
+            
+            logger.info(f" Built student lookup plan for: {cleaned_name}")
+            logger.debug("FINAL STUDENT NAME LOOKUP PLAN >>> %s", json.dumps(plan, indent=2, default=str))
+            
+            return await execute_plan(plan, user_id, user_role, self.llm)
             
         else:
             return None
@@ -1197,7 +1402,7 @@ async def process_query(
     page_size: int = 100,
     clarification: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """Main entry point for semantic query processing"""
+    """Main entry point for semantic query processing with fallback support"""
     
     try:
         processor = get_semantic_processor()
@@ -1223,12 +1428,18 @@ async def process_query(
             # Run entity resolver once to have a base dict
             entities = resolve_entities(query)
             
-            if clarification["column"] == "programme":
+            if clarification.get("column") == "programme":
                 entities.setdefault("filters", {})["programme"] = clarification["value"]
                 entities["force_programme"] = True
-            else:  # subjectname
+            elif clarification.get("column") == "subjectname":
                 entities["subjectname"] = clarification["value"]
                 entities["force_subject"] = True
+            elif clarification.get("type") == "student_selection":
+                # Handle student disambiguation
+                entities["selected_student_id"] = clarification["student_id"]
+                entities["selected_student_name"] = clarification["student_name"]
+                entities["force_student_selection"] = True
+                logger.info(f"🎯 Student selected: {clarification['student_name']} (ID: {clarification['student_id']})")
             
             # Remove disambiguation flags
             entities.pop("needs_disambiguation", None)
@@ -1239,6 +1450,22 @@ async def process_query(
         
         # Process query with LLM-first approach
         result = await processor.process_with_semantics(query, user_id, user_role, pre_resolved_entities)
+        
+        # 🔧 NEW: Try fallback queries if semantic processing failed or returned no results
+        if should_try_fallback(result):
+            logger.info(f"🔄 Semantic processing returned empty/failed result, trying fallback queries...")
+            
+            # Get Cassandra session for fallback queries
+            get_session = get_cassandra_session()
+            if get_session:
+                session = get_session()
+                fallback_result = await try_fallback_query(session, query, user_id, user_role)
+                
+                if fallback_result and fallback_result.get("success"):
+                    logger.info(f" Fallback query succeeded: {fallback_result.get('intent')}")
+                    result = fallback_result
+                else:
+                    logger.info(" Fallback query also failed or found no matches")
         
         # Apply pagination if requested and PaginatedResponse is available
         if PaginatedResponse and (page > 1 or page_size != 100):

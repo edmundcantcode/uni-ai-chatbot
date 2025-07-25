@@ -3,7 +3,7 @@ import React, { useState, useRef, useEffect } from "react";
 // Real API service - no mock data
 const apiService = {
   async sendQuery(query, userid, role, clarification = null) {
-    const url = "http://localhost:8000/api/chatbot";  // Fixed endpoint
+    const url = "http://localhost:8000/api/chatbot";
     
     const requestBody = {
       query: query,
@@ -11,9 +11,8 @@ const apiService = {
       role: role
     };
     
-    // Add clarification if provided
     if (clarification) {
-      requestBody.clarification = clarification;  // Backend expects 'clarification' field
+      requestBody.clarification = clarification;
     }
     
     try {
@@ -33,7 +32,7 @@ const apiService = {
       const data = await response.json();
       console.log("RAW_FROM_SERVER 👉", data);
       
-      return data; // <-- now askQuery gets {success:true, message:'...', data:[...], ...}
+      return data;
     } catch (error) {
       console.error('API call failed:', error);
       return {
@@ -46,38 +45,13 @@ const apiService = {
   }
 };
 
-// Helper function to build human-readable text from response data
-function buildBotText(d) {
-  if (!d) return "Query processed.";
-  if (d.message) return d.message;
-  
-  // nested count: d.data => [ [ {count:2129} ], {…meta…} ]
-  const nestedCount = Array.isArray(d.data) && Array.isArray(d.data[0]) && d.data[0][0]?.count;
-  const count = typeof d.count === "number" ? d.count : nestedCount;
-  
-  if (typeof count === "number") {
-    const noun = /active|enrolled|current/i.test(d.intent || "") ? "currently enrolled students" : "students";
-    return `📊 **${count.toLocaleString()}** ${noun}.`;
-  }
-  
-  if (Array.isArray(d.data)) {
-    // if it is the [rows, meta] pattern, show rows length
-    const rows = Array.isArray(d.data[0]) ? d.data[0] : d.data;
-    if (Array.isArray(rows)) {
-      return `📋 Returned ${rows.length.toLocaleString()} rows.`;
-    }
-  }
-  
-  return "Query processed.";
-}
-
 export default function EnhancedChatbot({ user = { userid: "demo", role: "student" }, onLogout = () => {} }) {
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState([
     {
       id: 1,
       type: 'bot',
-      content: `Hello ${user.role === 'admin' ? 'Admin' : user.userid}! 👋 I'm your University AI assistant with semantic understanding. How can I help you today?`,
+      content: `Hello ${user.role === 'admin' ? 'Admin' : user.userid}! 👋 I'm your University AI assistant with semantic understanding and smart name disambiguation. How can I help you today?`,
       timestamp: new Date()
     }
   ]);
@@ -86,8 +60,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const [connectionError, setConnectionError] = useState(false);
-  
-  // State for handling clarifications
   const [pendingClarification, setPendingClarification] = useState(null);
 
   const scrollToBottom = () => {
@@ -99,20 +71,17 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     scrollToBottom();
   }, [messages]);
 
-  // Unwrapping helper for backend responses
   const unwrapBackend = (r) => {
-    // r is whatever apiService.sendQuery returned
     if (!r) return null;
-    if (r.success !== undefined) return r; // already real payload
-    if (r.data && r.data.success !== undefined) return r.data; // unwrap {status:'success', data:{…}}
-    return r.data || r; // last resort
+    if (r.success !== undefined) return r;
+    if (r.data && r.data.success !== undefined) return r.data;
+    return r.data || r;
   };
 
   const buildBotText = (d) => {
     if (!d) return "Query processed.";
     if (d.message) return d.message;
     
-    // nested count: d.data => [ [ {count:2129} ], {…meta…} ]
     const nestedCount = Array.isArray(d.data) && Array.isArray(d.data[0]) && d.data[0][0]?.count;
     const count = typeof d.count === "number" ? d.count : nestedCount;
     
@@ -122,7 +91,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     }
     
     if (Array.isArray(d.data)) {
-      // if it is the [rows, meta] pattern, show rows length
       const rows = Array.isArray(d.data[0]) ? d.data[0] : d.data;
       if (Array.isArray(rows)) {
         return `📋 Returned ${rows.length.toLocaleString()} rows.`;
@@ -136,7 +104,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     const currentQuery = queryText || query.trim();
     if (!currentQuery && !clarification) return;
     
-    // Add user message (only if not a clarification)
     if (!clarification) {
       const userMessage = {
         id: Date.now(),
@@ -153,14 +120,16 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     setPendingClarification(null);
 
     try {
-      // Call the API service
       const raw = await apiService.sendQuery(currentQuery, user.userid, user.role, clarification);
       console.log("RAW_FROM_SERVER 👉", raw);
       
       const payload = unwrapBackend(raw);
       console.log("UNWRAPPED_PAYLOAD 👉", payload);
       
-      const needsClarification = payload?.intent === "clarify_column" && payload?.options;
+      const needsSubjectClarification = payload?.intent === "clarify_column" && payload?.options;
+      const needsStudentDisambiguation = payload?.intent === "disambiguate_student" && payload?.options;
+      const needsClarification = needsSubjectClarification || needsStudentDisambiguation;
+      
       const botText = needsClarification
         ? (payload?.message ?? "I need clarification to process your query.")
         : buildBotText(payload);
@@ -171,6 +140,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
         content: botText,
         data: payload,
         needsClarification,
+        needsStudentDisambiguation,
         success: payload?.success,
         isError: payload?.error || payload?.success === false,
         timestamp: new Date()
@@ -178,12 +148,13 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
       
       console.log("BOT_MESSAGE_BEFORE_SET ▶", botMessage);
       
-      // Handle clarification
       if (needsClarification && payload?.options) {
         setPendingClarification({
           query: currentQuery,
           options: payload.options,
+          clarificationType: needsStudentDisambiguation ? 'student' : 'subject',
           ambiguous_terms: payload.ambiguous_terms || [],
+          student_name: payload.student_name || null,
           message: payload.message
         });
       }
@@ -207,25 +178,43 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     setTimeout(() => inputRef.current?.focus(), 100);
   };
 
-  // Handle clarification choice
   const handleClarification = async (choice) => {
     if (!pendingClarification) return;
     
-    // Add user's choice as a message
-    const choiceMessage = {
-      id: Date.now(),
-      type: 'user', 
-      content: `I meant: ${choice.description} (${choice.value})`,
-      timestamp: new Date(),
-      isClarification: true
-    };
+    let choiceMessage;
+    if (pendingClarification.clarificationType === 'student') {
+      choiceMessage = {
+        id: Date.now(),
+        type: 'user', 
+        content: `I meant student: ${choice.student_name} (ID: ${choice.student_id}) - ${choice.description}`,
+        timestamp: new Date(),
+        isClarification: true
+      };
+    } else {
+      choiceMessage = {
+        id: Date.now(),
+        type: 'user', 
+        content: `I meant: ${choice.description} (${choice.value})`,
+        timestamp: new Date(),
+        isClarification: true
+      };
+    }
+    
     setMessages(prev => [...prev, choiceMessage]);
     
-    // Send clarification back to backend
-    const clarificationPayload = {
-      column: choice.column,
-      value: choice.value
-    };
+    let clarificationPayload;
+    if (pendingClarification.clarificationType === 'student') {
+      clarificationPayload = {
+        type: "student_selection",
+        student_id: choice.student_id,
+        student_name: choice.student_name
+      };
+    } else {
+      clarificationPayload = {
+        column: choice.column,
+        value: choice.value
+      };
+    }
     
     await askQuery(pendingClarification.query, clarificationPayload);
   };
@@ -288,8 +277,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     };
   };
 
-  // Render clarification options
-  const renderClarificationOptions = (options) => {
+  const renderSubjectClarificationOptions = (options) => {
     return (
       <div style={styles.clarificationContainer}>
         <div style={styles.clarificationHeader}>
@@ -325,12 +313,62 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
     );
   };
 
-  const renderFormattedMessage = (content, data, needsClarification) => {
+  const renderStudentDisambiguationOptions = (options) => {
+    return (
+      <div style={styles.clarificationContainer}>
+        <div style={styles.clarificationHeader}>
+          👥 Multiple students found. Please select one:
+        </div>
+        <div style={styles.clarificationOptions}>
+          {options.map((option, index) => (
+            <button
+              key={index}
+              style={{...styles.clarificationButton, ...styles.studentDisambiguationButton}}
+              onClick={() => handleClarification(option)}
+              onMouseOver={(e) => e.target.style.backgroundColor = '#fff3cd'}
+              onMouseOut={(e) => e.target.style.backgroundColor = '#f8f9fa'}
+            >
+              <div style={styles.clarificationButtonIcon}>
+                👤
+              </div>
+              <div style={styles.clarificationButtonContent}>
+                <div style={styles.clarificationButtonTitle}>
+                  {option.student_name}
+                </div>
+                <div style={styles.clarificationButtonValue}>
+                  ID: {option.student_id}
+                </div>
+                <div style={styles.studentInfoGrid}>
+                  <div style={styles.studentInfoItem}>
+                    <span style={styles.studentInfoLabel}>Programme:</span>
+                    <span style={styles.studentInfoValue}>{option.programme}</span>
+                  </div>
+                  <div style={styles.studentInfoItem}>
+                    <span style={styles.studentInfoLabel}>Cohort:</span>
+                    <span style={styles.studentInfoValue}>{option.cohort}</span>
+                  </div>
+                  <div style={styles.studentInfoItem}>
+                    <span style={styles.studentInfoLabel}>CGPA:</span>
+                    <span style={styles.studentInfoValue}>{option.cgpa}</span>
+                  </div>
+                  <div style={styles.studentInfoItem}>
+                    <span style={styles.studentInfoLabel}>Status:</span>
+                    <span style={styles.studentInfoValue}>{option.status}</span>
+                  </div>
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderFormattedMessage = (content, data, needsClarification, needsStudentDisambiguation) => {
     const parsed = parseMessage(content, data);
     
     return (
       <div>
-        {/* Semantic Intent & Entity Info */}
         {data && data.intent && (
           <div style={styles.semanticHeader}>
             <span style={styles.intentBadge}>
@@ -349,7 +387,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
           </div>
         )}
         
-        {/* Main Message Content */}
         <div style={styles.messageContent}>
           {content.split('\n').map((line, i) => {
             if (!line.trim()) return <br key={i} />;
@@ -378,12 +415,12 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
           })}
         </div>
         
-        {/* Clarification Options */}
         {needsClarification && data && data.options && (
-          renderClarificationOptions(data.options)
+          needsStudentDisambiguation 
+            ? renderStudentDisambiguationOptions(data.options)
+            : renderSubjectClarificationOptions(data.options)
         )}
         
-        {/* Stats Footer */}
         {data && (data.count !== undefined || data.execution_time) && (
           <div style={styles.statsFooter}>
             {data.count !== undefined && (
@@ -398,7 +435,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
           </div>
         )}
         
-        {/* Semantic Entities Debug */}
         {data && data.semantic_entities && Object.keys(data.semantic_entities).length > 0 && (
           <div style={styles.entitiesContainer}>
             <details style={styles.entitiesDetails}>
@@ -608,8 +644,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
       color: '#721c24',
       border: '1px solid #f5c6cb'
     },
-    
-    // Semantic processor styles
     semanticHeader: {
       display: 'flex',
       alignItems: 'center',
@@ -669,8 +703,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
       margin: '4px 0',
       color: '#495057'
     },
-    
-    // Clarification styles
     clarificationContainer: {
       marginTop: '16px',
       padding: '16px',
@@ -727,7 +759,30 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
       color: '#6c757d',
       fontStyle: 'italic'
     },
-    
+    studentDisambiguationButton: {
+      padding: '16px',
+      alignItems: 'flex-start'
+    },
+    studentInfoGrid: {
+      display: 'grid',
+      gridTemplateColumns: '1fr 1fr',
+      gap: '8px 16px',
+      marginTop: '8px',
+      fontSize: '12px'
+    },
+    studentInfoItem: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center'
+    },
+    studentInfoLabel: {
+      color: '#6c757d',
+      fontWeight: '500'
+    },
+    studentInfoValue: {
+      color: '#2c3e50',
+      fontWeight: '600'
+    },
     statsFooter: {
       marginTop: '16px',
       padding: '12px 16px',
@@ -927,12 +982,11 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
 
   return (
     <div style={styles.container}>
-      {/* Header */}
       <div style={styles.header}>
         <h1 style={styles.headerTitle}>
           🧠 Semantic AI Assistant
           <span style={{ fontSize: '12px', color: '#6c757d', fontWeight: 'normal' }}>
-            (Enhanced Query Processing)
+            (Enhanced with Name Disambiguation)
           </span>
         </h1>
         <div style={styles.headerInfo}>
@@ -953,9 +1007,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
         </div>
       </div>
 
-      {/* Chat Container */}
       <div style={styles.chatContainer}>
-        {/* Messages */}
         <div style={styles.messagesContainer}>
           {messages.map((message) => (
             <div
@@ -983,14 +1035,13 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
                     {message.content}
                   </div>
                 ) : (
-                  renderFormattedMessage(message.content, message.data, message.needsClarification)
+                  renderFormattedMessage(message.content, message.data, message.needsClarification, message.needsStudentDisambiguation)
                 )}
                 
-                {/* Data display for bot messages - improved table data detection */}
                 {message.data && (() => {
                   const tableCandidate = message.data?.data;
                   const tableData = Array.isArray(tableCandidate) && Array.isArray(tableCandidate[0]) 
-                    ? tableCandidate[0] // first element is the rows array
+                    ? tableCandidate[0]
                     : Array.isArray(tableCandidate) 
                     ? tableCandidate 
                     : null;
@@ -1011,14 +1062,10 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
             </div>
           ))}
           
-          {/* Typing indicator */}
           {loading && (
             <div style={styles.botMessageWrapper}>
               <div style={styles.typingIndicator}>
-                <div style={{
-                  display: 'flex',
-                  gap: '4px'
-                }}>
+                <div style={{ display: 'flex', gap: '4px' }}>
                   <div style={{
                     width: '6px',
                     height: '6px',
@@ -1051,7 +1098,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
           <div ref={messagesEndRef} />
         </div>
         
-        {/* Input - Disabled during clarification */}
         <div style={styles.inputContainer}>
           <div style={styles.inputWrapper}>
             <textarea
@@ -1067,7 +1113,7 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
               placeholder={
                 pendingClarification 
                   ? "Please select an option above to clarify your query..."
-                  : "Ask me anything about university data... Try 'my CGPA', 'count students', or 'my math grade'"
+                  : "Ask me anything about university data... Try 'my CGPA', 'count students', 'grades for John Smith', or 'subjects for student Alice'"
               }
               style={{
                 ...styles.input,
@@ -1102,7 +1148,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
             </button>
           </div>
           
-          {/* Clarification hint */}
           {pendingClarification && (
             <div style={{
               marginTop: '12px',
@@ -1114,13 +1159,14 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
               borderRadius: '20px',
               border: '1px solid #ffeaa7'
             }}>
-              💡 Please select one of the options above to continue with your query
+              💡 {pendingClarification.clarificationType === 'student' 
+                    ? 'Please select the correct student from the options above'
+                    : 'Please select one of the options above to continue with your query'}
             </div>
           )}
         </div>
       </div>
       
-      {/* Debug toggle */}
       <button
         onClick={() => setShowDebug(!showDebug)}
         style={{
@@ -1142,7 +1188,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
         🐛
       </button>
       
-      {/* Debug panel */}
       {showDebug && (
         <div style={{
           position: 'fixed',
@@ -1173,14 +1218,14 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
             overflowY: 'auto'
           }}>
             <strong>System Type:</strong><br/>
-            Semantic Query Processor with Disambiguation<br/><br/>
+            Semantic Query Processor with Name Disambiguation<br/><br/>
             
             <strong>User Info:</strong><br/>
             Role: {user.role}<br/>
             ID: {user.userid}<br/><br/>
             
             <strong>Pending Clarification:</strong><br/>
-            {pendingClarification ? 'Yes - awaiting user choice' : 'None'}<br/><br/>
+            {pendingClarification ? `${pendingClarification.clarificationType} disambiguation pending` : 'None'}<br/><br/>
             
             <strong>Last Response Data:</strong><br/>
             {(() => {
@@ -1192,7 +1237,8 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
                 <div style={{ fontSize: '11px', maxHeight: '200px', overflowY: 'auto' }}>
                   {data.intent && <div><strong>Intent:</strong> {data.intent}</div>}
                   {data.semantic_entities && <div><strong>Entities:</strong> {JSON.stringify(data.semantic_entities, null, 2)}</div>}
-                  {data.ambiguous_terms && <div><strong>Ambiguous:</strong> {JSON.stringify(data.ambiguous_terms, null, 2)}</div>}
+                  {data.student_name && <div><strong>Student Name:</strong> {data.student_name}</div>}
+                  {data.options && <div><strong>Options Count:</strong> {data.options.length}</div>}
                   {data.count !== undefined && <div><strong>Count:</strong> {data.count}</div>}
                   {data.execution_time && <div><strong>Time:</strong> {(data.execution_time * 1000).toFixed(0)}ms</div>}
                   {data.success !== undefined && <div><strong>Success:</strong> {data.success ? '✅' : '❌'}</div>}
@@ -1213,7 +1259,6 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
           }
         }
         
-        /* Scrollbar styling */
         ::-webkit-scrollbar {
           width: 8px;
         }
@@ -1232,25 +1277,16 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
           background: #a1a1a1;
         }
         
-        /* Table hover effects */
         table tbody tr:hover {
           background-color: #e3f2fd !important;
           transition: background-color 0.2s;
         }
         
-        /* Button hover effects */
         button:hover {
           transform: translateY(-1px);
           box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
         
-        /* Clarification button hover effects */
-        .clarification-button:hover {
-          border-color: #007bff !important;
-          box-shadow: 0 2px 8px rgba(0,123,255,0.2) !important;
-        }
-        
-        /* Responsive design */
         @media (max-width: 768px) {
           .clarification-options {
             flex-direction: column;
@@ -1268,9 +1304,12 @@ export default function EnhancedChatbot({ user = { userid: "demo", role: "studen
             flex-direction: column;
             align-items: flex-start;
           }
+          
+          .student-info-grid {
+            grid-template-columns: 1fr !important;
+          }
         }
         
-        /* Animation for clarification appearance */
         .clarification-container {
           animation: slideIn 0.3s ease-out;
         }

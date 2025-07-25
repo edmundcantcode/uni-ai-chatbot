@@ -1,4 +1,4 @@
-# backend/logic/entity_resolver.py
+
 import re
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 from rapidfuzz import process, fuzz
@@ -234,21 +234,18 @@ def _cast_value(col: str, val):
             return int(val)
         return val
     
-    # Note: cohort normalization is now handled separately in enhance_step_with_entities
     return val
 
-# Safe integer conversion utility
 def _safe_int(v):
     try:
         return int(v)
     except (TypeError, ValueError):
         return None
 
-# ---------- Constants for clean selects ----------
+
 SELECT_STUDENTS = ["id","name","programme","overallcgpa","cohort","status","graduated"]
 SELECT_SUBJECTS = ["id","subjectname","grade","overallpercentage","examyear","exammonth"]
 
-# ---------- Table Column Definitions ----------
 STUDENTS_COLS = {"id","name","programme","overallcgpa","cohort","status","graduated","gender","country","year"}
 SUBJECTS_COLS = {"id","subjectname","grade","overallpercentage","examyear","exammonth"}
 
@@ -313,14 +310,13 @@ def normalize_ops(step):
     
     return step
 
-# ---------- Keywords and Constants (from second file) ----------
+
 # Keywords that suggest different tables
 GRADE_KEYWORDS = {"grade", "grades", "score", "result", "marks", "performance", "scored"}
 STUDENT_KEYWORDS = {"student", "students", "learner", "pupil", "enrolled"}
 CGPA_KEYWORDS = {"cgpa", "gpa", "average", "cumulative"}
 STATUS_KEYWORDS = {"graduated", "active", "status", "enrolled", "completed"}
 
-# ---------- Type Normalization Constants ----------
 BOOLEAN_COLS = {"graduated"}
 INT_COLS = {"year", "examyear", "id"}
 
@@ -407,13 +403,12 @@ def resolve_entities(user_query: str) -> Dict[str, Any]:
     
     q_lower = user_query.lower()
     
-    # ---------------------------------------------------------
     # 0️⃣ Guard: cohort-style queries never talk about subjects
     if "cohort" in q_lower and not any(k in q_lower for k in GRADE_KEYWORDS):
         skip_subject_lookup = True
     else:
         skip_subject_lookup = False
-    # ---------------------------------------------------------
+  
     
     # Determine table hint
     entities["table_hint"] = _determine_table_hint(q_lower)
@@ -639,13 +634,13 @@ def _extract_cohort(q_lower: str) -> Dict[str, Any]:
     """Extract cohort information (month/year) for YYYYMM format."""
     cohort_info = {}
     
-    # 1️⃣ Direct YYYYMM already there ------------------------------------
+
     direct = re.search(r"\b(20\d{4})\b", q_lower)
     if direct:
         cohort_info["cohort"] = direct.group(1)
         return cohort_info
     
-    # 2️⃣ "[Month] YYYY" → YYYYMM --------------------------------------
+
     m = MONTH_YEAR_RE.search(q_lower)
     if m:
         month, year = m.group(1), m.group(2)
@@ -654,7 +649,7 @@ def _extract_cohort(q_lower: str) -> Dict[str, Any]:
             cohort_info["cohort"] = code
             return cohort_info
     
-    # 3️⃣ Legacy logic (still allows "cohort March" + separate year) -------
+
     found_months = []
     for month in MONTH_NUM:
         if month in q_lower.split():  # abbrev
@@ -666,7 +661,6 @@ def _extract_cohort(q_lower: str) -> Dict[str, Any]:
     if found_months:
         cohort_info["cohort"] = found_months[0]  # e.g. "march"
     
-    # NOTE: we no longer return "year" — downstream logic should ignore it
     return cohort_info
 
 def _extract_country(q_lower: str) -> Optional[str]:
@@ -693,8 +687,6 @@ def _extract_country(q_lower: str) -> Optional[str]:
     for key, value in countries.items():
         if key in q_lower:
             return value
-    
-    # Pattern: "from [Country]"
     from_pattern = r"from\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)"
     match = re.search(from_pattern, q_lower)
     if match:
@@ -715,7 +707,7 @@ def enhance_step_with_entities(step: Dict[str, Any], entities: Dict[str, Any]) -
     filters = dict(entities.get("filters", {}))  # Copy to avoid mutation
     operators = entities.get("operators", {})
     
-    # Fix programme/subjectname confusion and canonicalize names
+
     if "programme" in filters:
         raw_prog = filters["programme"]
         canon_prog = canonicalize_programme(raw_prog)
@@ -762,7 +754,7 @@ def enhance_step_with_entities(step: Dict[str, Any], entities: Dict[str, Any]) -
         if cohort_code:
             where["cohort"] = {"op": "=", "value": cohort_code}
             logger.debug(f"Cohort normalized to '{cohort_code}'")
-            # Remove raw pieces so they don't get added again
+         
             filters = {k: v for k, v in filters.items() if k not in ["cohort", "year"]}
     
     # Clean up any remaining year filter (no longer needed)
@@ -858,7 +850,6 @@ def fix_subject_names_in_step(step: Dict[str, Any]) -> Dict[str, Any]:
     step["where"] = where
     return step
 
-# ---------- Plan Canonicalization Helper ----------
 # Status normalization constants
 ACTIVE_WORDS_SET = {"active", "currently active", "enrolled", "current", "currently enrolled"}
 
