@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # Ollama LLM Service
   ollama:
     image: ollama/ollama:latest
     container_name: university_ollama
@@ -13,20 +14,34 @@ services:
     networks:
       - university_network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
+  # Model Initialization (LLaMA 3.2)
   model_init:
-    # use the official Ollama image instead of building
     image: ollama/ollama:latest
     container_name: university_model_init
     volumes:
-      - ollama_data:/root/.ollama      # mount the same volume as ollama
+      - ollama_data:/root/.ollama
     networks:
       - university_network
     depends_on:
-      - ollama
-    command: ["ollama", "pull", "llama-3.2"]  # pull and then exit
+      ollama:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Waiting for Ollama to be ready...' &&
+        sleep 10 &&
+        ollama pull llama3.2:latest &&
+        echo 'Model llama3.2:latest pulled successfully'
+      "
     restart: "no"
 
+  # FastAPI Backend
   backend:
     build:
       context: .
@@ -37,27 +52,45 @@ services:
     volumes:
       - ./backend:/app/backend
       - ./backend/utils/unique_values_prompt.json:/app/backend/utils/unique_values_prompt.json
+      - ./data:/app/data  # Mount data directory for CSV files
     environment:
+      # Cassandra Configuration
       - CASSANDRA_HOST=sunway.hep88.com
       - CASSANDRA_PORT=9042
       - CASSANDRA_USERNAME=planusertest
       - CASSANDRA_PASSWORD=Ic7cU8K965Zqx
       - CASSANDRA_KEYSPACE=subjectplanning
+      
+      # Ollama/LLM Configuration
       - OLLAMA_HOST=ollama
       - OLLAMA_PORT=11434
       - LLAMA_MODEL=llama3.2:latest
+      
+      # API Configuration
       - API_HOST=0.0.0.0
       - API_PORT=8000
       - API_DEBUG=true
+      
+      # Python Configuration
       - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
     networks:
       - university_network
     depends_on:
-      - ollama
-      - model_init     # ensure model_init runs first
+      ollama:
+        condition: service_healthy
+      model_init:
+        condition: service_completed_successfully
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
+  # React Frontend
   frontend:
     build:
       context: .
@@ -67,16 +100,23 @@ services:
       - "3000:3000"
     environment:
       - REACT_APP_API_URL=http://localhost:8000
+      - GENERATE_SOURCEMAP=false
+      - NODE_ENV=development
     networks:
       - university_network
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
+    stdin_open: true
+    tty: true
 
 volumes:
   ollama_data:
     driver: local
+    name: university_ollama_data
 
 networks:
   university_network:
     driver: bridge
+    name: university_network
