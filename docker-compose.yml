@@ -14,6 +14,19 @@ services:
       - university_network
     restart: unless-stopped
 
+  model_init:
+    # use the official Ollama image instead of building
+    image: ollama/ollama:latest
+    container_name: university_model_init
+    volumes:
+      - ollama_data:/root/.ollama      # mount the same volume as ollama
+    networks:
+      - university_network
+    depends_on:
+      - ollama
+    command: ["ollama", "pull", "llama-3.2"]  # pull and then exit
+    restart: "no"
+
   backend:
     build:
       context: .
@@ -41,7 +54,7 @@ services:
       - university_network
     depends_on:
       - ollama
-      - model_init
+      - model_init     # ensure model_init runs first
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
@@ -59,20 +72,6 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
-
-  model_init:
-    build:
-      context: .
-      dockerfile: Dockerfile.model_init
-    container_name: university_model_init
-    networks:
-      - university_network
-    depends_on:
-      - ollama
-    environment:
-      - OLLAMA_HOST=ollama
-      - OLLAMA_PORT=11434
-    restart: "no"
 
 volumes:
   ollama_data:
