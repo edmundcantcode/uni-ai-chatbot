@@ -1,0 +1,42 @@
+# University AI Assistant
+
+A semantic query processing system for university academic data with natural language interface.
+
+## Requirements
+- Docker Desktop installed and running
+- 8GB+ RAM recommended
+
+## How to Run
+
+### Windows
+1. Open Command Prompt in project folder
+2. Run: `start.bat`
+3. Wait for browser to open automatically
+4. Alternatively, just run start,bat in the folder
+5. It takes up to a few minutes to initialize
+
+### Mac/Linux
+1. Open Terminal in project folder
+2. Run: `chmod +x start.sh && ./start.sh`
+3. Wait for browser to open automatically
+
+## Access the System
+- **URL**: http://localhost:3000
+- **Admin Login**: username=`admin`, password=`admin`
+- **Student Login**: username=`12345`, password=`12345`
+
+## Example Queries
+- "What is my CGPA?" (Student)
+- "Show my grades" (Student)
+- "Count all students" (Admin)
+- "List active students" (Admin)
+
+## Stop the System
+```bash
+docker-compose down
+```
+
+## Troubleshooting
+- Make sure Docker Desktop is running
+- Check if ports 3000, 8000, 11434 are available
+- View logs: `docker-compose logs -f`
