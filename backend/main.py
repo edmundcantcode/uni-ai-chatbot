@@ -1,323 +1,146 @@
-# main.py or app.py - Main application integration
-
-# CRITICAL: Setup logging FIRST before any other imports
 import logging
-import sys
-logging.basicConfig(
-    level=logging.INFO,  # Change to DEBUG for even more detail
-    format="%(asctime)s %(levelname)s %(name)s:%(lineno)d - %(message)s",
-    stream=sys.stdout,
-    force=True
-)
-
-from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import asyncio
-from typing import Optional, Dict, Any, List
-import json
+from cassandra.cluster import Session
 
-# FIXED: Import the correct semantic processor
-from backend.logic.semantic_query_processor import process_query as semantic_process_query
-from backend.database.connect_cassandra import get_session
+# ✅ use the backend. path so it works inside the container
+from backend.database.connect_cassandra import initialize_database, close_connection, get_session
+from backend.routes.chatbot_routes import router as chatbot_router
 
-app = FastAPI(title="Dynamic Academic Query API", version="2.0.0")
-
-# Setup logger for this module
 logger = logging.getLogger(__name__)
 
-# CORS middleware
+app = FastAPI(title="University AI System")
+
+# CORS so the React app can call the API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Request models
-class QueryRequest(BaseModel):
-    query: str
-    userid: str  # Changed from user_id to match your existing API
-    role: str = "admin"  # Changed from user_role to match your existing API
-    session_id: Optional[str] = None
-
-class BatchQueryRequest(BaseModel):
-    queries: List[str]
-    userid: str
-    role: str = "admin"
-
-# Response models
-class QueryResponse(BaseModel):
-    success: bool
-    message: str
-    data: List[Dict[str, Any]]
-    count: int
-    error: bool
-    query: str
-    intent: str
-    execution_time: float
-    processor_used: Optional[str] = None
-    semantic_entities: Optional[Dict[str, Any]] = None
-
-# Initialize system on startup
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the system on startup"""
-    logger.info("🚀 Starting Dynamic Academic Query API...")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     try:
-        # Test database connection
-        session = get_session()
-        logger.info("✅ Database connection successful")
+        print("🚀 Starting University AI System...")
+        await initialize_database()
+        print("✅ Database connection established")
         
-        # Import and initialize semantic processor
-        from backend.logic.semantic_query_processor import get_semantic_processor
-        processor = get_semantic_processor()
-        logger.info("✅ Semantic processor initialized")
+        # Test normalization system loading
+        try:
+            from backend.utils.value_index import get_stats, is_loaded
+            stats = get_stats()
+            if is_loaded():
+                print("✅ Normalization system loaded")
+                print(f"📊 Normalization stats: {stats}")
+            else:
+                print("⚠️  Normalization system not loaded, using fallback behavior")
+        except Exception as e:
+            print(f"⚠️  Normalization system error: {e}")
         
-        logger.info("🎯 System startup complete!")
-        
-    except Exception as e:
-        logger.error(f"❌ Startup failed: {e}")
-        raise
+        print("✅ Llama LLM service is ready")
+        print("🎉 Application startup complete!")
+        logger.info("✅ Cassandra initialized on startup")
+        yield
+    finally:
+        print("🛑 Shutting down University AI System...")
+        close_connection()
+        print("✅ Shutdown complete")
+        logger.info("✅ Cassandra connection closed on shutdown")
 
-# Health check endpoint
+app.router.lifespan_context = lifespan
+
+def cassandra_session() -> Session:
+    return get_session()
+
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
     try:
-        # Test database connection
-        session = get_session()
+        row = get_session().execute("SELECT release_version FROM system.local").one()
         
-        # Test semantic processor
-        from backend.logic.semantic_query_processor import get_semantic_processor
-        processor = get_semantic_processor()
-        
-        return {
-            "status": "healthy",
-            "database": "connected",
-            "semantic_processor": "initialized",
-            "timestamp": str(asyncio.get_event_loop().time())
-        }
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": str(asyncio.get_event_loop().time())
-        }
-
-# Main query endpoint (semantic processor)
-@app.post("/api/chatbot", response_model=QueryResponse)
-async def chatbot_endpoint(request: QueryRequest):
-    """
-    Process a single query using the semantic system
-    
-    Examples:
-    - "count active students"
-    - "how many currently enrolled students"
-    - "my math grade"
-    - "students with CGPA > 3.0"
-    """
-    try:
-        # 🔥 CRITICAL LOGGING: Log incoming request
-        logger.info("🔥 INCOMING REQUEST ▶ query='%s' userid='%s' role='%s'", 
-                   request.query, request.userid, request.role)
-        
-        result = await semantic_process_query(
-            query=request.query,
-            user_id=request.userid,
-            user_role=request.role
-        )
-        
-        # 🔥 CRITICAL LOGGING: Log final result before sending to UI
-        logger.info("🔥 FINAL RESPONSE ◀ success=%s count=%s len(data)=%s intent=%s", 
-                   result.get("success"), result.get("count"), 
-                   len(result.get("data", [])), result.get("intent"))
-        
-        # 🔥 CRITICAL LOGGING: Log first few rows if any data
-        if result.get("data") and len(result["data"]) > 0:
-            logger.info("🔥 SAMPLE DATA ◀ first_row=%s", json.dumps(result["data"][0], default=str))
-        else:
-            logger.info("🔥 NO DATA ◀ result.data=%s", result.get("data"))
-        
-        return QueryResponse(**result)
-        
-    except Exception as e:
-        logger.error(f"❌ Query processing failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
-
-# Alternative query endpoint with different naming
-@app.post("/query", response_model=QueryResponse)
-async def process_query_endpoint(request: QueryRequest):
-    """Alternative endpoint with different naming convention"""
-    return await chatbot_endpoint(request)
-
-# Batch query endpoint
-@app.post("/batch_query")
-async def process_batch_queries(request: BatchQueryRequest):
-    """
-    Process multiple queries in batch
-    """
-    try:
-        results = []
-        
-        for query in request.queries:
-            try:
-                result = await semantic_process_query(
-                    query=query,
-                    user_id=request.userid,
-                    user_role=request.role
-                )
-                results.append({
-                    "query": query,
-                    "result": result,
-                    "status": "success"
-                })
-            except Exception as e:
-                results.append({
-                    "query": query,
-                    "error": str(e),
-                    "status": "failed"
-                })
-        
-        return {
-            "batch_results": results,
-            "total_queries": len(request.queries),
-            "successful": sum(1 for r in results if r["status"] == "success"),
-            "failed": sum(1 for r in results if r["status"] == "failed")
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Batch processing failed: {str(e)}")
-
-# System status endpoint
-@app.get("/system/status")
-async def system_status():
-    """Get detailed system status"""
-    try:
-        from backend.logic.semantic_query_processor import get_semantic_processor
-        from backend.constants.subjects_index import SUBJECT_CANONICAL
-        
-        processor = get_semantic_processor()
-        session = get_session()
-        
-        return {
-            "status": "operational",
-            "components": {
-                "semantic_processor": "initialized",
-                "database": "connected",
-                "subject_index": f"{len(SUBJECT_CANONICAL)} subjects loaded"
-            },
-            "capabilities": [
-                "Natural language query processing",
-                "Subject grade lookup",
-                "Student filtering and counting",
-                "CGPA-based queries",
-                "Entity resolution"
-            ]
-        }
-    except Exception as e:
-        return {
-            "status": "degraded",
-            "error": str(e)
-        }
-
-# Test query endpoint
-@app.get("/test")
-async def test_queries():
-    """Test the system with sample queries"""
-    
-    test_queries = [
-        {
-            "query": "count active students",
-            "userid": "admin",
-            "role": "admin"
-        },
-        {
-            "query": "how many currently enrolled students",
-            "userid": "admin", 
-            "role": "admin"
-        },
-        {
-            "query": "count all students",
-            "userid": "admin",
-            "role": "admin"
-        },
-        {
-            "query": "my math grade",
-            "userid": "ST001",
-            "role": "student"
-        }
-    ]
-    
-    results = []
-    for test_case in test_queries:
+        # Check normalization status
         try:
-            result = await semantic_process_query(
-                query=test_case["query"],
-                user_id=test_case["userid"],
-                user_role=test_case["role"]
-            )
-            results.append({
-                "test_case": test_case,
-                "result": {
-                    "success": result.get("success"),
-                    "count": result.get("count"),
-                    "intent": result.get("intent"),
-                    "processor_used": result.get("processor_used")
-                },
-                "status": "success"
-            })
-        except Exception as e:
-            results.append({
-                "test_case": test_case,
-                "error": str(e),
-                "status": "failed"
-            })
-    
-    return {
-        "test_results": results,
-        "total_tests": len(test_queries),
-        "passed": sum(1 for r in results if r["status"] == "success"),
-        "failed": sum(1 for r in results if r["status"] == "failed"),
-        "system_ready": all(r["status"] == "success" for r in results)
-    }
-
-# Debug endpoint for development
-@app.get("/debug/entities/{query}")
-async def debug_entity_resolution(query: str):
-    """Debug endpoint to see entity resolution"""
-    try:
-        from backend.logic.entity_resolver import resolve_entities
-        entities = resolve_entities(query)
+            from backend.utils.value_index import is_loaded, get_stats
+            norm_status = "enabled" if is_loaded() else "disabled"
+            norm_stats = get_stats() if is_loaded() else {}
+        except Exception:
+            norm_status = "error"
+            norm_stats = {}
+        
         return {
-            "query": query,
-            "entities": entities
+            "status": "ok", 
+            "cassandra_release": row[0],
+            "normalization": {
+                "status": norm_status,
+                "stats": norm_stats
+            }
         }
     except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {"status": "error", "detail": str(e)}
+
+@app.get("/students/count")
+async def count_students(session: Session = Depends(cassandra_session)):
+    try:
+        row = session.execute("SELECT COUNT(*) FROM students").one()
+        return {"count": row[0]}
+    except Exception as e:
+        logger.error(f"Error querying Cassandra: {e}")
+        raise HTTPException(status_code=500, detail="Database query failed")
+
+@app.get("/api/normalization/status")
+async def normalization_status():
+    """Check normalization system status."""
+    try:
+        from backend.utils.value_index import is_loaded, get_stats
+        
+        if not is_loaded():
+            return {"status": "disabled", "message": "Normalization system not loaded"}
+        
+        stats = get_stats()
         return {
-            "query": query,
-            "error": str(e)
+            "status": "enabled",
+            "stats": stats,
+            "message": "Normalization system is running"
         }
+    except Exception as e:
+        return {"status": "error", "message": f"Error checking normalization: {str(e)}"}
 
-# Legacy compatibility endpoint (if needed)
-@app.post("/chatbot/query")
-async def legacy_query_endpoint(request: QueryRequest):
-    """Legacy endpoint for backwards compatibility"""
-    return await chatbot_endpoint(request)
+@app.get("/api/normalization/test") 
+async def test_normalization():
+    """Test normalization functions."""
+    try:
+        from backend.utils.normalizers import normalize_cohort, normalize_grade
+        from backend.utils.value_index import subject_variants, programme_variants
+        
+        test_results = {
+            "cohort_normalization": {
+                "March 2022": normalize_cohort("March 2022"),
+                "2022-03": normalize_cohort("2022-03"), 
+                "03/2022": normalize_cohort("03/2022"),
+                "Sept 2024": normalize_cohort("Sept 2024")
+            },
+            "grade_normalization": {
+                "A+^": normalize_grade("A+^"),
+                "B**": normalize_grade("B**"),
+                "F#": normalize_grade("F#")
+            },
+            "subject_variants": {
+                "Database Fundamentals": subject_variants("Database Fundamentals"),
+                "Programming": subject_variants("Programming")
+            },
+            "programme_variants": {
+                "Computer Science": programme_variants("Computer Science"),
+                "CS": programme_variants("CS")
+            }
+        }
+        
+        return {"test_results": test_results}
+        
+    except Exception as e:
+        return {"error": f"Test failed: {str(e)}"}
 
-if __name__ == "__main__":
-    import uvicorn
-    
-    # 🔥 CRITICAL: Set environment variable for unbuffered output
-    import os
-    os.environ["PYTHONUNBUFFERED"] = "1"
-    
-    logger.info("🚀 Starting uvicorn server...")
-    uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=8000, 
-        reload=True,
-        log_level="info"  # Ensure uvicorn also logs at INFO level
-    )
+# ✅ mount all chatbot routes under /api
+app.include_router(chatbot_router, prefix="/api")

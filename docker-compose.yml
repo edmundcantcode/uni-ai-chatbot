@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # Ollama LLM Service
+  # Ollama LLM Service with GPU Support
   ollama:
     image: ollama/ollama:latest
     container_name: university_ollama
@@ -11,34 +11,37 @@ services:
       - ollama_data:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
     networks:
       - university_network
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/version"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    # GPU configuration for Ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
-  # Model Initialization (LLaMA 3.2)
+  # Model Initialization (Qwen3)
   model_init:
     image: ollama/ollama:latest
     container_name: university_model_init
-    volumes:
-      - ollama_data:/root/.ollama
     networks:
       - university_network
     depends_on:
-      ollama:
-        condition: service_healthy
-    command: >
-      sh -c "
-        echo 'Waiting for Ollama to be ready...' &&
-        sleep 10 &&
-        ollama pull llama3.2:latest &&
-        echo 'Model llama3.2:latest pulled successfully'
-      "
+      - ollama
+    environment:
+      - OLLAMA_HOST=ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "echo 'Waiting for Ollama to be ready...' && \
+      sleep 20 && \
+      ollama pull qwen3:8b && \
+      echo 'Model qwen3:8b pulled successfully' && \
+      exit 0"
     restart: "no"
 
   # FastAPI Backend
@@ -50,9 +53,15 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app/backend
-      - ./backend/utils/unique_values_prompt.json:/app/backend/utils/unique_values_prompt.json
-      - ./data:/app/data  # Mount data directory for CSV files
+      # Mount ALL Python files, not just backend folder
+      - ./main.py:/app/main.py                    # Mount main.py
+      - ./backend:/app/backend                    # Mount backend folder
+      - ./data:/app/data                          # Mount data folder
+      # Mount any other root Python files if they exist
+      - ./requirements.txt:/app/requirements.txt
+      # If you have other Python files at root, mount them too:
+      # - ./config.py:/app/config.py
+      # - ./utils.py:/app/utils.py
     environment:
       # Cassandra Configuration
       - CASSANDRA_HOST=sunway.hep88.com
@@ -64,7 +73,11 @@ services:
       # Ollama/LLM Configuration
       - OLLAMA_HOST=ollama
       - OLLAMA_PORT=11434
-      - LLAMA_MODEL=llama3.2:latest
+      - QWEN_MODEL=qwen3:8b  # Changed from LLAMA_MODEL
+      
+      # GPU Configuration
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
       
       # API Configuration
       - API_HOST=0.0.0.0
@@ -77,18 +90,10 @@ services:
     networks:
       - university_network
     depends_on:
-      ollama:
-        condition: service_healthy
-      model_init:
-        condition: service_completed_successfully
+      - ollama
+      - model_init
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
 
   # React Frontend
   frontend:
@@ -105,8 +110,7 @@ services:
     networks:
       - university_network
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
     restart: unless-stopped
     stdin_open: true
     tty: true
@@ -114,9 +118,7 @@ services:
 volumes:
   ollama_data:
     driver: local
-    name: university_ollama_data
 
 networks:
   university_network:
     driver: bridge
-    name: university_network
